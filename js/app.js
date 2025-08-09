@@ -58,6 +58,8 @@ function renderGrid() {
       block.href = info.linkUrl || '#';
       block.target = '_blank';
       block.className = 'block sold';
+      // DEBUG: colorer le bloc vendu si l’image ne charge pas
+block.style.backgroundColor = '#8b5cf6';
       block.style.backgroundImage = `url(${info.imageUrl})`;
       block.title = info.linkUrl || '';
     } else {
