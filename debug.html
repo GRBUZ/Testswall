@@ -24,13 +24,15 @@
   <h1>Debug – purchasedBlocks.json & images</h1>
   <div class="controls">
     <button id="reload">Re-check now</button>
-    <span class="muted">Tip: each block = index key (0-based). Try one entry first.</span>
+    <span class="muted">Tip: With regions, structure is <code>{"cells":{...},"regions":[...]}</code>.</span>
   </div>
   <div id="status" class="muted" style="margin-top:8px;"></div>
   <table id="tbl" style="display:none">
     <thead>
       <tr>
-        <th>Index</th>
+        <th>Type</th>
+        <th>Index / Start</th>
+        <th>Size</th>
         <th>Image</th>
         <th>imageUrl</th>
         <th>linkUrl</th>
@@ -54,59 +56,53 @@ async function load() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
 
-    const entries = Object.entries(data);
-    status.innerHTML = `<span class="ok">JSON OK</span> — ${entries.length} entr${entries.length===1?'y':'ies'} loaded.`;
-
-    if (!entries.length) {
-      status.innerHTML += ' (empty object). Add one entry like ' +
-        '<code>{"0":{"imageUrl":"https://picsum.photos/100?random=1","linkUrl":"https://…"}}</code>';
-      return;
+    let cells = {}, regions = [];
+    if (data && (data.cells || data.regions)) {
+      cells = data.cells || {};
+      regions = data.regions || [];
+    } else {
+      cells = data || {};
+      regions = [];
     }
 
+    const cellEntries = Object.entries(cells);
+    const regEntries = regions;
+
+    status.innerHTML = `<span class="ok">JSON OK</span> — ${cellEntries.length} cell(s), ${regEntries.length} region(s).`;
     tbl.style.display = '';
-    for (const [idx, { imageUrl, linkUrl }] of entries) {
+
+    // Cells (legacy 1x1)
+    for (const [idx, { imageUrl, linkUrl }] of cellEntries) {
       const tr = document.createElement('tr');
-
-      const tdIdx = document.createElement('td');
-      tdIdx.textContent = idx;
-      tr.appendChild(tdIdx);
-
+      tr.innerHTML = `<td>cell</td><td>${idx}</td><td>1×1</td>`;
       const tdImg = document.createElement('td');
-      const img = document.createElement('img');
-      img.className = 'thumb';
-      img.alt = 'thumb';
-      img.src = imageUrl;
-      tdImg.appendChild(img);
-      tr.appendChild(tdImg);
+      const img = document.createElement('img'); img.className='thumb'; img.src=imageUrl; tdImg.appendChild(img);
+      const tdUrl = document.createElement('td'); const a1=document.createElement('a'); a1.href=imageUrl; a1.target='_blank'; a1.textContent=imageUrl; tdUrl.appendChild(a1);
+      const tdLink = document.createElement('td'); const a2=document.createElement('a'); a2.href=linkUrl||'#'; a2.target='_blank'; a2.textContent=linkUrl||'(missing)'; tdLink.appendChild(a2);
+      const tdStatus = document.createElement('td'); tdStatus.textContent='…';
+      tr.appendChild(tdImg); tr.appendChild(tdUrl); tr.appendChild(tdLink); tr.appendChild(tdStatus);
+      img.onload=()=>{ tdStatus.innerHTML='<span class="ok">IMAGE OK</span>'; img.classList.remove('err'); };
+      img.onerror=()=>{ tdStatus.innerHTML='<span class="err">IMAGE ERROR</span>'; img.classList.add('err'); };
+      tbody.appendChild(tr);
+    }
 
-      const tdUrl = document.createElement('td');
-      const a1 = document.createElement('a');
-      a1.href = imageUrl;
-      a1.target = '_blank';
-      a1.textContent = imageUrl;
-      tdUrl.appendChild(a1);
-      tr.appendChild(tdUrl);
-
-      const tdLink = document.createElement('td');
-      const a2 = document.createElement('a');
-      a2.href = linkUrl || '#';
-      a2.target = '_blank';
-      a2.textContent = linkUrl || '(missing)';
-      tdLink.appendChild(a2);
-      tr.appendChild(tdLink);
-
-      const tdStatus = document.createElement('td');
-      tdStatus.textContent = '…';
-      tr.appendChild(tdStatus);
-
-      img.onload = () => { tdStatus.innerHTML = '<span class="ok">IMAGE OK</span>'; img.classList.remove('err'); };
-      img.onerror = () => { tdStatus.innerHTML = '<span class="err">IMAGE ERROR (check path/case)</span>'; img.classList.add('err'); };
-
+    // Regions
+    for (const r of regEntries) {
+      const tr = document.createElement('tr');
+      const size = `${r.w||1}×${r.h||1}`;
+      tr.innerHTML = `<td>region</td><td>${r.start}</td><td>${size}</td>`;
+      const tdImg = document.createElement('td');
+      const img = document.createElement('img'); img.className='thumb'; img.src=r.imageUrl; tdImg.appendChild(img);
+      const tdUrl = document.createElement('td'); const a1=document.createElement('a'); a1.href=r.imageUrl; a1.target='_blank'; a1.textContent=r.imageUrl; tdUrl.appendChild(a1);
+      const tdLink = document.createElement('td'); const a2=document.createElement('a'); a2.href=r.linkUrl||'#'; a2.target='_blank'; a2.textContent=r.linkUrl||'(missing)'; tdLink.appendChild(a2);
+      const tdStatus = document.createElement('td'); tdStatus.textContent='…';
+      tr.appendChild(tdImg); tr.appendChild(tdUrl); tr.appendChild(tdLink); tr.appendChild(tdStatus);
+      img.onload=()=>{ tdStatus.innerHTML='<span class="ok">IMAGE OK</span>'; img.classList.remove('err'); };
+      img.onerror=()=>{ tdStatus.innerHTML='<span class="err">IMAGE ERROR</span>'; img.classList.add('err'); };
       tbody.appendChild(tr);
     }
   } catch (e) {
-    status.innerHTML = `<span class="err">JSON ERROR</span> — ${e.message}. `
-      + `Check validity (no trailing comma, proper quotes).`;
+    status.innerHTML = `<span class="err">JSON ERROR</span> — ${e.message}.`;
   }
 }
 

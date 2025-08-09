@@ -1,6 +1,12 @@
 {
-  "0": {
-    "imageUrl": "https://picsum.photos/100?random=1",
-    "linkUrl": "https://example.com"
-  }
+  "cells": {},
+  "regions": [
+    {
+      "start": 200,
+      "w": 5,
+      "h": 6,
+      "imageUrl": "https://picsum.photos/500/600?random=2",
+      "linkUrl": "https://example.com"
+    }
+  ]
 }

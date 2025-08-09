@@ -74,12 +74,17 @@ body {
   border-color: rgba(255,255,255,.35);
 }
 
-/* Grid */
+/* Stage with overlay */
 .grid-container {
   flex: 1; display: flex; justify-content: center; align-items: center;
   padding: 1rem; overflow: auto;
 }
+.stage {
+  position: relative;
+  width: 1000px; height: 1000px;
+}
 .grid {
+  position: absolute; left: 0; top: 0;
   display: grid;
   grid-template-columns: repeat(100, 10px);
   grid-template-rows: repeat(100, 10px);
@@ -87,7 +92,24 @@ body {
   image-rendering: pixelated;
   border: 1px solid var(--border);
   background: #e5e7eb;
+  z-index: 1;
 }
+#regionsLayer {
+  position: absolute; left: 0; top: 0;
+  width: 1000px; height: 1000px;
+  z-index: 2;
+  pointer-events: none; /* regions re-enable pointer-events individually */
+}
+.region { 
+  position: absolute; display: block;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+  pointer-events: auto;
+  border: 1px solid rgba(124,58,237,.25); /* subtle violet */
+}
+
+/* Cells */
 .block { 
   display: block;              /* important for <a class="block"> */
   width: 10px; 
@@ -96,12 +118,7 @@ body {
   border: 1px solid #e2e8f0; 
 }
 .block.selected { outline: 1px solid var(--accent); }
-.block.sold {
-  outline: 1px solid var(--violet);  /* visual debug */
-  background-repeat: no-repeat;
-  background-position: center;
-  background-size: cover;
-}
+.block.sold { /* legacy single-cell style (unused with overlay) */ }
 
 /* Modal */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6);

@@ -1,4 +1,5 @@
 const grid = document.getElementById('pixelGrid');
+const regionsLayer = document.getElementById('regionsLayer');
 const buyButton = document.getElementById('buyButton');
 const contactButton = document.getElementById('contactButton');
 const infoForm = document.getElementById('infoForm');
@@ -9,11 +10,34 @@ const pixelsLeftEl = document.getElementById('pixelsLeft');
 const paymentUrl = 'https://paypal.me/YourUSAccount'; // TODO: set yours
 
 const TOTAL_PIXELS = 1_000_000; // 100x100 blocks * 100 pixels each
-//const DATA_VERSION = 4; // bump to invalidate cache on JSON
-const DATA_VERSION = 5;
+const DATA_VERSION = 6; // bump to invalidate cache on JSON
+const GRID_SIZE = 100;
+const CELL_PX = 10;
 
-// +$0.01 every 1,000 pixels = every 10 blocks
-function getBlocksSold() { return Object.keys(purchasedBlocks).length; } // 1 block = 100 px
+// Data holders (back-compat: either legacy map or new {cells, regions})
+let cellsMap = {};   // {"50": {imageUrl, linkUrl}, ...}
+let regions = [];    // [{start, w, h, imageUrl, linkUrl}, ...]
+
+/* ---------- Pricing ( +$0.01 per 1,000 pixels => every 10 blocks ) ---------- */
+function buildSoldSet() {
+  const set = new Set();
+  for (const k of Object.keys(cellsMap)) set.add(+k);
+  for (const r of regions) {
+    const start = (r.start|0);
+    const w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
+    const sr = Math.floor(start / GRID_SIZE), sc = start % GRID_SIZE;
+    for (let dy = 0; dy < h; dy++) {
+      for (let dx = 0; dx < w; dx++) {
+        const rr = sr + dy, cc = sc + dx;
+        if (rr >= 0 && rr < GRID_SIZE && cc >= 0 && cc < GRID_SIZE) {
+          set.add(rr * GRID_SIZE + cc);
+        }
+      }
+    }
+  }
+  return set;
+}
+function getBlocksSold() { return buildSoldSet().size; } // 1 block = 100 px
 function getCurrentPixelPrice() {
   const steps = Math.floor(getBlocksSold() / 10); // 10 blocks = 1,000 px
   const price = 1 + steps * 0.01;
@@ -21,62 +45,94 @@ function getCurrentPixelPrice() {
 }
 function getCurrentBlockPrice() { return Math.round(getCurrentPixelPrice() * 100 * 100) / 100; }
 function formatUSD(n) { return '$' + n.toFixed(2); }
-function refreshHeaderPricing() {
-  const p = getCurrentPixelPrice();
-  priceLine.textContent = `1 Pixel = ${formatUSD(p)}`;
-}
+function refreshHeaderPricing() { priceLine.textContent = `1 Pixel = ${formatUSD(getCurrentPixelPrice())}`; }
 function refreshPixelsLeft() {
   const left = TOTAL_PIXELS - getBlocksSold() * 100;
   pixelsLeftEl.textContent = `${left.toLocaleString()} pixels left`;
 }
 
-let purchasedBlocks = {};
+/* ---------------------- Load data (backward compatible) --------------------- */
 fetch(`data/purchasedBlocks.json?v=${DATA_VERSION}`)
   .then(async (r) => {
     if (!r.ok) throw new Error(`HTTP ${r.status} fetching purchasedBlocks.json`);
     return r.json();
   })
   .then((data) => {
-    purchasedBlocks = data;
-    document.title = `Influencers Wall – ${Object.keys(purchasedBlocks).length} sold`;
+    if (data && (data.cells || data.regions)) {
+      cellsMap = data.cells || {};
+      regions = data.regions || [];
+    } else {
+      // legacy: pure map of index -> info
+      cellsMap = data || {};
+      regions = [];
+    }
+    document.title = `Influencers Wall – ${getBlocksSold()} blocks sold`;
     renderGrid(); refreshHeaderPricing(); refreshPixelsLeft(); updateBuyButtonLabel();
   })
   .catch((err) => {
     alert('Error loading purchasedBlocks.json: ' + err.message);
-    purchasedBlocks = {}; // fallback
+    cellsMap = {}; regions = [];
     renderGrid(); refreshHeaderPricing(); refreshPixelsLeft(); updateBuyButtonLabel();
   });
 
+/* ------------------------------ Grid rendering ----------------------------- */
 function renderGrid() {
-  for (let i = 0; i < 10000; i++) {
-    const index = i;
-    const info = purchasedBlocks[index];
-    let block;
+  const sold = buildSoldSet();
 
-    if (info) {
-      // Sold block: clickable <a> with background image
-      block = document.createElement('a');
-      block.href = info.linkUrl || '#';
-      block.target = '_blank';
-      block.className = 'block sold';
-      // DEBUG: colorer le bloc vendu si l’image ne charge pas
-block.style.backgroundColor = '#8b5cf6';
-      block.style.backgroundImage = `url(${info.imageUrl})`;
-      block.title = info.linkUrl || '';
-    } else {
-      // Free block: selectable <div>
-      block = document.createElement('div');
-      block.className = 'block';
-      block.addEventListener('click', () => {
-        block.classList.toggle('selected');
-        updateBuyButtonLabel();
-      });
-    }
-
-    block.dataset.index = index;
+  // Base cells (only free ones are clickable)
+  grid.innerHTML = '';
+  for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
+    if (sold.has(i)) continue; // skip sold cells; regions will overlay
+    const block = document.createElement('div');
+    block.className = 'block';
+    block.dataset.index = i;
+    block.addEventListener('click', () => {
+      block.classList.toggle('selected');
+      updateBuyButtonLabel();
+    });
     grid.appendChild(block);
   }
 
+  // Overlay: regions (multi-block images)
+  regionsLayer.innerHTML = '';
+
+  // Legacy single cells as 1×1 regions
+  for (const [k, info] of Object.entries(cellsMap)) {
+    const idx = +k;
+    const row = Math.floor(idx / GRID_SIZE), col = idx % GRID_SIZE;
+    const a = document.createElement('a');
+    a.href = info.linkUrl || '#';
+    a.target = '_blank';
+    a.className = 'region';
+    a.style.left = (col * CELL_PX) + 'px';
+    a.style.top = (row * CELL_PX) + 'px';
+    a.style.width = CELL_PX + 'px';
+    a.style.height = CELL_PX + 'px';
+    a.style.backgroundImage = `url(${info.imageUrl})`;
+    a.title = info.linkUrl || '';
+    regionsLayer.appendChild(a);
+  }
+
+  // New multi-block regions
+  for (const r of regions) {
+    const start = (r.start|0);
+    const w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
+    const row = Math.floor(start / GRID_SIZE), col = start % GRID_SIZE;
+
+    const a = document.createElement('a');
+    a.href = r.linkUrl || '#';
+    a.target = '_blank';
+    a.className = 'region';
+    a.style.left = (col * CELL_PX) + 'px';
+    a.style.top = (row * CELL_PX) + 'px';
+    a.style.width = (w * CELL_PX) + 'px';
+    a.style.height = (h * CELL_PX) + 'px';
+    a.style.backgroundImage = `url(${r.imageUrl})`;
+    a.title = r.linkUrl || '';
+    regionsLayer.appendChild(a);
+  }
+
+  // Buttons
   buyButton.addEventListener('click', () => {
     const selected = Array.from(document.querySelectorAll('.block.selected')).map(el => parseInt(el.dataset.index));
     if (!selected.length) { alert('Please select at least one free block.'); return; }
@@ -101,7 +157,7 @@ block.style.backgroundColor = '#8b5cf6';
     } catch (err) {
       console.error('Netlify form post failed:', err);
     }
-    const blocks = data.get('blockIndex').split(',');
+    const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean);
     const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;
     const note = `blocks-${blocks.join(',')}`;
     window.location.href = `${paymentUrl}/${total}?note=${note}`;
