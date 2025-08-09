@@ -9,7 +9,8 @@ const pixelsLeftEl = document.getElementById('pixelsLeft');
 const paymentUrl = 'https://paypal.me/YourUSAccount'; // TODO: set yours
 
 const TOTAL_PIXELS = 1_000_000; // 100x100 blocks * 100 pixels each
-const DATA_VERSION = 4; // bump to invalidate cache on JSON
+//const DATA_VERSION = 4; // bump to invalidate cache on JSON
+const DATA_VERSION = 5;
 
 // +$0.01 every 1,000 pixels = every 10 blocks
 function getBlocksSold() { return Object.keys(purchasedBlocks).length; } // 1 block = 100 px
