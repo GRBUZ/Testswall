@@ -1,0 +1,4 @@
+
+/* pending (reserved) cells should not be clickable; we actually skip rendering them,
+   but if you add a class later, use this style for yellow hint. */
+.block.pending { background: #fef3c7; border-color: #f59e0b; cursor: not-allowed; }
