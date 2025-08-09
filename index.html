@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Influencers Wall: 1 Million Pixels</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="container hero-row">
+      <div class="brand">
+        <h1>Influencers Wall: 1 million pixels</h1>
+        <p class="tagline">Claim your spot on the ultimate influencer wall.</p>
+      </div>
+      <div class="stats">
+        <div id="priceLine" class="price">1 Pixel = $1.00</div>
+        <div class="rule">Every 1,000 pixels sold, price +$0.01</div>
+        <div id="pixelsLeft" class="left">1,000,000 pixels left</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <div class="container nav-row">
+        <a id="buyButton" class="nav-link" href="javascript:void(0)">Buy Pixels</a>
+        <a id="contactButton" class="nav-link ghost" href="mailto:you@domain.com">Contact Me</a>
+      </div>
+    </nav>
+  </header>
+
+  <!-- Modal: buy form -->
+  <div id="infoForm" class="modal hidden">
+    <form id="influencerForm"
+          name="influencer-purchase"
+          method="POST"
+          action="/success.html"
+          data-netlify="true"
+          netlify-honeypot="bot-field"
+          enctype="multipart/form-data">
+      <h2>Your information</h2>
+
+      <!-- Netlify form detection -->
+      <input type="hidden" name="form-name" value="influencer-purchase">
+      <!-- Honeypot -->
+      <p class="hidden">
+        <label>Don’t fill this out if you’re human: <input name="bot-field" /></label>
+      </p>
+      <!-- Selected blocks (set by JS) -->
+      <input type="hidden" name="blockIndex" id="blockIndex">
+
+      <label>
+        Profile photo (upload):
+        <input type="file" name="imageFile" accept="image/*" required>
+      </label>
+      <label>
+        Your page (Instagram / TikTok / YouTube):
+        <input type="url" name="linkUrl" required placeholder="https://…">
+      </label>
+      <label>
+        Your email:
+        <input type="email" name="email" required placeholder="you@example.com">
+      </label>
+      <div class="buttons">
+        <button type="submit" class="btn">Confirm & Pay</button>
+        <button type="button" id="cancelForm" class="btn btn-ghost">Cancel</button>
+      </div>
+    </form>
+  </div>
+
+  <main class="grid-container">
+    <div class="grid" id="pixelGrid"></div>
+  </main>
+
+  <footer>
+    <p>© 2025 YourName. All rights reserved.</p>
+    <p><a href="terms.html" target="_blank">Terms of Use</a></p>
+  </footer>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

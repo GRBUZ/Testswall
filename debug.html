@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Debug – Influencers Wall</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:20px;}
+  h1{font-size:18px;margin:0 0 12px;}
+  .ok{color:#16a34a;font-weight:700}
+  .err{color:#dc2626;font-weight:700}
+  table{border-collapse:collapse;width:100%;margin-top:12px}
+  th,td{border:1px solid #e5e7eb;padding:8px;font-size:14px}
+  th{background:#f8fafc;text-align:left}
+  .thumb{width:40px;height:40px;object-fit:cover;border:2px solid #10b981}
+  .thumb.err{border-color:#ef4444}
+  .muted{color:#6b7280;font-size:13px}
+  .controls{display:flex;gap:8px;margin-top:10px}
+  button{padding:6px 10px;cursor:pointer}
+  code{background:#f3f4f6;padding:2px 4px;border-radius:4px}
+</style>
+</head>
+<body>
+  <h1>Debug – purchasedBlocks.json & images</h1>
+  <div class="controls">
+    <button id="reload">Re-check now</button>
+    <span class="muted">Tip: each block = index key (0-based). Try one entry first.</span>
+  </div>
+  <div id="status" class="muted" style="margin-top:8px;"></div>
+  <table id="tbl" style="display:none">
+    <thead>
+      <tr>
+        <th>Index</th>
+        <th>Image</th>
+        <th>imageUrl</th>
+        <th>linkUrl</th>
+        <th>Load status</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+async function load() {
+  const status = document.getElementById('status');
+  const tbl = document.getElementById('tbl');
+  const tbody = tbl.querySelector('tbody');
+  status.textContent = 'Loading data/purchasedBlocks.json …';
+  tbl.style.display = 'none';
+  tbody.innerHTML = '';
+
+  try {
+    const res = await fetch('data/purchasedBlocks.json?ts=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+
+    const entries = Object.entries(data);
+    status.innerHTML = `<span class="ok">JSON OK</span> — ${entries.length} entr${entries.length===1?'y':'ies'} loaded.`;
+
+    if (!entries.length) {
+      status.innerHTML += ' (empty object). Add one entry like ' +
+        '<code>{"0":{"imageUrl":"https://picsum.photos/100?random=1","linkUrl":"https://…"}}</code>';
+      return;
+    }
+
+    tbl.style.display = '';
+    for (const [idx, { imageUrl, linkUrl }] of entries) {
+      const tr = document.createElement('tr');
+
+      const tdIdx = document.createElement('td');
+      tdIdx.textContent = idx;
+      tr.appendChild(tdIdx);
+
+      const tdImg = document.createElement('td');
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.alt = 'thumb';
+      img.src = imageUrl;
+      tdImg.appendChild(img);
+      tr.appendChild(tdImg);
+
+      const tdUrl = document.createElement('td');
+      const a1 = document.createElement('a');
+      a1.href = imageUrl;
+      a1.target = '_blank';
+      a1.textContent = imageUrl;
+      tdUrl.appendChild(a1);
+      tr.appendChild(tdUrl);
+
+      const tdLink = document.createElement('td');
+      const a2 = document.createElement('a');
+      a2.href = linkUrl || '#';
+      a2.target = '_blank';
+      a2.textContent = linkUrl || '(missing)';
+      tdLink.appendChild(a2);
+      tr.appendChild(tdLink);
+
+      const tdStatus = document.createElement('td');
+      tdStatus.textContent = '…';
+      tr.appendChild(tdStatus);
+
+      img.onload = () => { tdStatus.innerHTML = '<span class="ok">IMAGE OK</span>'; img.classList.remove('err'); };
+      img.onerror = () => { tdStatus.innerHTML = '<span class="err">IMAGE ERROR (check path/case)</span>'; img.classList.add('err'); };
+
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    status.innerHTML = `<span class="err">JSON ERROR</span> — ${e.message}. `
+      + `Check validity (no trailing comma, proper quotes).`;
+  }
+}
+
+document.getElementById('reload').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>
