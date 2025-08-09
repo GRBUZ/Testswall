@@ -1,20 +1,29 @@
 import { getStore } from '@netlify/blobs';
+import { json } from './_common.js';
 
 const STORE = 'reservations';
 const STATE_KEY = 'state';
 
 export default async (req) => {
-  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-  const body = await req.json().catch(() => ({}));
-  const rid = (body.reservationId || '').toString();
+  try {
+    if (req.method === 'OPTIONS') return json({}, 204);
+    if (req.method !== 'POST') return json({ ok:false, error:'METHOD_NOT_ALLOWED' }, 405);
 
-  const store = getStore(STORE, { consistency: 'strong' });
-  const state = await store.getJSON(STATE_KEY) || { sold: {}, locks: {} };
+    const body = await req.json().catch(() => ({}));
+    const rid = (body.reservationId || '').toString();
+    if (!rid) return json({ ok:false, error:'MISSING_ID' }, 400);
 
-  if (rid && state.locks && state.locks[rid]) {
-    delete state.locks[rid];
-    await store.setJSON(STATE_KEY, state);
-    return new Response(JSON.stringify({ ok:true }));
+    const store = getStore(STORE, { consistency: 'strong' });
+    const state = await store.getJSON(STATE_KEY) || { sold: {}, locks: {} };
+
+    if (state.locks && state.locks[rid]) {
+      delete state.locks[rid];
+      await store.setJSON(STATE_KEY, state);
+      return json({ ok:true });
+    }
+    return json({ ok:false, error:'NOT_FOUND' }, 404);
+  } catch (e) {
+    console.error('unlock error', e);
+    return json({ ok:false, error:'SERVER_ERROR' }, 500);
   }
-  return new Response(JSON.stringify({ ok:false, error:'NOT_FOUND' }), { status: 404 });
 };
