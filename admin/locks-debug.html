@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Locks Live Debug</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:20px}
+  h1{font-size:18px;margin:0 0 12px}
+  .ok{color:#16a34a;font-weight:700}
+  .err{color:#dc2626;font-weight:700}
+  table{border-collapse:collapse;width:100%;margin-top:12px}
+  th,td{border:1px solid #e5e7eb;padding:8px;font-size:14px}
+  th{background:#f8fafc;text-align:left}
+  .row{display:flex;gap:8px;align-items:center;margin-top:8px}
+  input[type="text"]{padding:6px;border:1px solid #cbd5e1;border-radius:6px}
+  button{padding:6px 10px;cursor:pointer}
+  code{background:#f3f4f6;padding:2px 4px;border-radius:4px}
+  .muted{color:#6b7280}
+</style>
+</head>
+<body>
+<h1>Locks Live Debug</h1>
+<div class="row">
+  <button id="refresh">Refresh status</button>
+  <span id="status" class="muted">–</span>
+</div>
+<table id="tbl" style="display:none">
+  <thead>
+    <tr><th>Reservation ID</th><th>Blocks</th><th>ExpireAt</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<h2>Quick lock test</h2>
+<div class="row">
+  <label>Blocks (comma separated): <input id="blocks" type="text" value="0,1,2"></label>
+  <button id="lock">Lock</button>
+</div>
+<div class="row">
+  <label>Reservation ID: <input id="rid" type="text"></label>
+  <button id="unlock">Unlock</button>
+</div>
+
+<script>
+const $ = (s)=>document.querySelector(s);
+async function getStatus() {
+  const res = await fetch('/.netlify/functions/status', { cache: 'no-store' });
+  const j = await res.json();
+  $('#status').innerHTML = j.ok ? '<span class="ok">OK</span>' : '<span class="err">ERR</span>';
+  const tbl = $('#tbl'), tbody = tbl.querySelector('tbody'); tbody.innerHTML = '';
+  if (j.locks) {
+    tbl.style.display = '';
+    for (const [id, l] of Object.entries(j.locks)) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${id}</td><td>${(l.blocks||[]).join(', ')}</td><td>${new Date(l.expireAt).toLocaleTimeString()}</td>`;
+      tbody.appendChild(tr);
+    }
+  } else {
+    tbl.style.display = 'none';
+  }
+}
+$('#refresh').addEventListener('click', getStatus);
+$('#lock').addEventListener('click', async () => {
+  const blocks = $('#blocks').value.split(',').map(s=>parseInt(s.trim())).filter(n=>Number.isInteger(n));
+  const res = await fetch('/.netlify/functions/lock', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ blocks }) });
+  const j = await res.json();
+  if (j.ok) { $('#rid').value = j.reservationId || ''; }
+  alert(JSON.stringify(j, null, 2));
+  await getStatus();
+});
+$('#unlock').addEventListener('click', async () => {
+  const reservationId = $('#rid').value.trim();
+  const res = await fetch('/.netlify/functions/unlock', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ reservationId }) });
+  const j = await res.json();
+  alert(JSON.stringify(j, null, 2));
+  await getStatus();
+});
+getStatus();
+</script>
+</body>
+</html>

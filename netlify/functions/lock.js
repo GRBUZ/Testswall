@@ -9,9 +9,10 @@ const HOLD_MS = 10 * 60 * 1000; // 10 minutes
 const now = () => Date.now();
 
 async function readState() {
-  const store = getStore(STORE);
-  // FIX: use get(..., { type: 'json' }) instead of getJSON
-  const state = (await store.get(STATE_KEY, { type: 'json', consistency: 'strong' })) || { sold: {}, locks: {} };
+  // Force strong consistency at store level
+  const store = getStore(STORE, { consistency: 'strong' });
+  // Use get(..., { type:'json' }) per API
+  const state = (await store.get(STATE_KEY, { type: 'json' })) || { sold: {}, locks: {} };
   // prune expired
   const t = now();
   let mutated = false;
@@ -60,7 +61,9 @@ export default async (req) => {
     state.locks[rid] = { blocks, email, createdAt: now(), expireAt };
     await store.setJSON(STATE_KEY, state);
 
-    return json({ ok:true, reservationId: rid, expireAt });
+    // Re-read immediately to ensure visibility
+    const verify = await store.get(STATE_KEY, { type: 'json' });
+    return json({ ok:true, reservationId: rid, expireAt, visible: !!verify?.locks?.[rid] });
   } catch (e) {
     console.error('lock error', e);
     return json({ ok:false, error:'SERVER_ERROR', message: e?.message || String(e) }, 500);
