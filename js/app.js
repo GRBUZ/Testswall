@@ -1,3 +1,9 @@
+// === Influencers Wall – Frontend reservations patch ===
+// - Marks blocks as PENDING immediately after lock()
+// - Polls server every 10s to refresh pending from other users
+// - Unlocks on cancel and on pagehide (tab close)
+// - Avoids attaching duplicate event listeners
+
 const grid = document.getElementById('pixelGrid');
 const regionsLayer = document.getElementById('regionsLayer');
 const buyButton = document.getElementById('buyButton');
@@ -10,40 +16,20 @@ const pixelsLeftEl = document.getElementById('pixelsLeft');
 const paymentUrl = 'https://paypal.me/YourUSAccount'; // TODO: set yours
 
 const TOTAL_PIXELS = 1_000_000; // 100x100 blocks * 100 pixels each
-const DATA_VERSION = 6; // bump to invalidate cache on JSON
+const DATA_VERSION = 6; // JSON cache buster (unchanged here)
 const GRID_SIZE = 100;
 const CELL_PX = 10;
 
 // Data holders (back-compat: either legacy map or new {cells, regions})
 let cellsMap = {};   // {"50": {imageUrl, linkUrl}, ...}
 let regions = [];    // [{start, w, h, imageUrl, linkUrl}, ...]
-let pendingSet = new Set(); // blocks reserved by other users (server)
+let pendingSet = new Set(); // blocks reserved by others (server) or by us (optimistic)
 let activeReservationId = null;
 let activeReservedBlocks = [];
 
 /* ---------- Pricing ( +$0.01 per 1,000 pixels => every 10 blocks ) ---------- */
-function buildSoldSet() {
-  const set = new Set();
-  for (const k of Object.keys(cellsMap)) set.add(+k);
-  for (const r of regions) {
-    const start = (r.start|0);
-    const w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
-    const sr = Math.floor(start / GRID_SIZE), sc = start % GRID_SIZE;
-    for (let dy = 0; dy < h; dy++) {
-      for (let dx = 0; dx < w; dx++) {
-        const rr = sr + dy, cc = sc + dx;
-        if (rr >= 0 && rr < GRID_SIZE && cc >= 0 && cc < GRID_SIZE) {
-          set.add(rr * GRID_SIZE + cc);
-        }
-      }
-    }
-  }
-  // add pending locks
-  for (const b of pendingSet) set.add(b);
-  return set;
-}
-function getBlocksSold() { 
-  // sold = committed only, for pricing; pending doesn't change price
+function calcSoldSetCommittedOnly() {
+  // committed = sold only, used for pricing
   const set = new Set();
   for (const k of Object.keys(cellsMap)) set.add(+k);
   for (const r of regions) {
@@ -52,8 +38,15 @@ function getBlocksSold() {
     const sr = Math.floor(start / GRID_SIZE), sc = start % GRID_SIZE;
     for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) set.add((sr+dy)*GRID_SIZE+(sc+dx));
   }
-  return set.size;
+  return set;
 }
+function buildTakenSet() {
+  // taken = committed SOLD + PENDING reservations (cannot be selected)
+  const taken = calcSoldSetCommittedOnly();
+  for (const b of pendingSet) taken.add(b);
+  return taken;
+}
+function getBlocksSold() { return calcSoldSetCommittedOnly().size; } // 1 block = 100 px
 function getCurrentPixelPrice() {
   const steps = Math.floor(getBlocksSold() / 10); // 10 blocks = 1,000 px
   const price = 1 + steps * 0.01;
@@ -70,17 +63,16 @@ function refreshPixelsLeft() {
 /* ---------------------- Load data + server status --------------------- */
 async function loadStatus() {
   try {
-    const r = await fetch('/.netlify/functions/status');
+    const r = await fetch('/.netlify/functions/status', { cache: 'no-store' });
     const s = await r.json();
     pendingSet = new Set(s.pending || []);
   } catch (e) {
     console.warn('status fetch failed', e);
-    pendingSet = new Set();
   }
 }
 
 async function loadData() {
-  const r = await fetch(`data/purchasedBlocks.json?v=${DATA_VERSION}`);
+  const r = await fetch(`data/purchasedBlocks.json?v=${DATA_VERSION}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching purchasedBlocks.json`);
   const data = await r.json();
   if (data && (data.cells || data.regions)) {
@@ -92,25 +84,14 @@ async function loadData() {
   }
 }
 
-(async () => {
-  try {
-    await Promise.all([loadData(), loadStatus()]);
-    document.title = `Influencers Wall – ${getBlocksSold()} blocks sold`;
-    renderGrid(); refreshHeaderPricing(); refreshPixelsLeft(); updateBuyButtonLabel();
-  } catch (err) {
-    alert('Error initializing: ' + err.message);
-    renderGrid();
-  }
-})();
-
 /* ------------------------------ Grid rendering ----------------------------- */
 function renderGrid() {
-  const taken = buildSoldSet();
+  const taken = buildTakenSet();
 
   // Base cells (only free ones are clickable)
   grid.innerHTML = '';
   for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
-    if (taken.has(i)) continue; // skip sold or pending cells; regions will overlay
+    if (taken.has(i)) continue; // skip SOLD or PENDING cells; regions overlay handles sold visuals
     const block = document.createElement('div');
     block.className = 'block';
     block.dataset.index = i;
@@ -159,11 +140,6 @@ function renderGrid() {
     a.title = r.linkUrl || '';
     regionsLayer.appendChild(a);
   }
-
-  // Buttons
-  buyButton.addEventListener('click', onBuyClick);
-  contactButton.addEventListener('click', () => { window.location.href = 'mailto:you@domain.com'; });
-  cancelForm.addEventListener('click', onCancel);
 }
 
 function selectedIndices() {
@@ -186,14 +162,21 @@ async function onBuyClick() {
       if (r.status === 409 && err.conflicts) {
         alert('Some blocks just got reserved by someone else: ' + err.conflicts.join(', '));
         await loadStatus(); // refresh pending from server
-        renderGrid();
+        renderGrid(); updateBuyButtonLabel();
         return;
       }
       throw new Error(err.error || ('HTTP '+r.status));
     }
     const res = await r.json();
     activeReservationId = res.reservationId;
-    activeReservedBlocks = selected;
+    activeReservedBlocks = selected.slice();
+
+    // Mark as PENDING locally immediately
+    for (const b of selected) pendingSet.add(b);
+    renderGrid();
+    updateBuyButtonLabel();
+
+    // Open form
     infoForm.classList.remove('hidden');
     document.getElementById('blockIndex').value = selected.join(',');
   } catch (e) {
@@ -203,6 +186,10 @@ async function onBuyClick() {
 
 async function onCancel() {
   infoForm.classList.add('hidden');
+  // Optimistically free locally
+  for (const b of activeReservedBlocks) pendingSet.delete(b);
+  renderGrid(); updateBuyButtonLabel();
+
   // Unlock reservation if we created one
   if (activeReservationId) {
     try {
@@ -215,7 +202,7 @@ async function onCancel() {
     activeReservationId = null;
     activeReservedBlocks = [];
     await loadStatus();
-    renderGrid();
+    renderGrid(); updateBuyButtonLabel();
   }
 }
 
@@ -229,6 +216,7 @@ influencerForm.addEventListener('submit', async (e) => {
     console.error('Netlify form post failed:', err);
   }
   // Keep reservation until payment webhook converts to SOLD or expires
+  
   //const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
   //const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;juste pour enlever le paiement (enleve le comment apres)
   //const note = `blocks-${blocks.join(',')}`;juste pour enlever le paiement (enleve le comment apres)
@@ -245,3 +233,40 @@ function updateBuyButtonLabel() {
     buyButton.textContent = `Buy ${count} block${count>1?'s':''} (${count*100} px) – ${formatUSD(total)}`;
   }
 }
+
+/* ------------------------------ One-time setup ----------------------------- */
+(async () => {
+  try {
+    await Promise.all([loadData(), loadStatus()]);
+    document.title = `Influencers Wall – ${getBlocksSold()} blocks sold`;
+  } catch (err) {
+    alert('Error initializing: ' + err.message);
+  }
+  // Initial render and UI setup
+  renderGrid(); refreshHeaderPricing(); refreshPixelsLeft(); updateBuyButtonLabel();
+
+  // Bind handlers ONCE
+  buyButton.addEventListener('click', onBuyClick);
+  contactButton.addEventListener('click', () => { window.location.href = 'mailto:you@domain.com'; });
+  cancelForm.addEventListener('click', onCancel);
+
+  // Poll server every 10s to keep pending locks fresh for everyone
+  setInterval(async () => {
+    const before = JSON.stringify([...pendingSet].sort());
+    await loadStatus();
+    const after = JSON.stringify([...pendingSet].sort());
+    if (before !== after) { renderGrid(); updateBuyButtonLabel(); }
+  }, 10000);
+})();
+
+// Free reservation if tab closes
+window.addEventListener('pagehide', async () => {
+  if (!activeReservationId) return;
+  try {
+    await fetch('/.netlify/functions/unlock', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reservationId: activeReservationId })
+    });
+  } catch {}
+});
