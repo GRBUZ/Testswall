@@ -49,7 +49,8 @@ export default async (req) => {
     const reservationId = (body.reservationId || '').toString() || null;
     const email = (body.email || '').toString().slice(0, 200);
 
-    if (!incoming.length and op !== 'set') return json({ ok:false, error:'NO_BLOCKS' }, 400);
+    // HOTFIX: use JS '&&' instead of 'and'
+    if (!incoming.length && op !== 'set') return json({ ok:false, error:'NO_BLOCKS' }, 400);
 
     const { store, state } = await readStateStrong();
 
@@ -68,7 +69,6 @@ export default async (req) => {
     else if (op === 'set') next = new Set(incoming);
     else return json({ ok:false, error:'BAD_OP' }, 400);
 
-    // conflicts on blocks you try to newly add
     const newOnes = [...next].filter(b => !current.has(b));
     const taken = takenSet(state, rid);
     const conflicts = newOnes.filter(b => taken.has(b));

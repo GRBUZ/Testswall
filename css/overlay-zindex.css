@@ -1,0 +1,7 @@
+/* Force stacking: regions above the grid */
+#stage, .stage { position: relative; }
+#pixelGrid { position: relative; z-index: 10; }
+#regionsLayer { position: absolute; inset: 0; z-index: 20; pointer-events: auto; }
+#regionLayer a.region, #regionsLayer a.region { display:block; background-size: cover; background-position: center; background-repeat: no-repeat; }
+/* Safety: make anchors clickable */
+.region { display:block; background-size: cover; background-position: center; background-repeat: no-repeat; }
