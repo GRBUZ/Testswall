@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Debug – Influencers Wall</title>
+<title>Debug – Data & Images</title>
 <style>
   body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:20px;}
   h1{font-size:18px;margin:0 0 12px;}
@@ -12,7 +12,7 @@
   table{border-collapse:collapse;width:100%;margin-top:12px}
   th,td{border:1px solid #e5e7eb;padding:8px;font-size:14px}
   th{background:#f8fafc;text-align:left}
-  .thumb{width:40px;height:40px;object-fit:cover;border:2px solid #10b981}
+  .thumb{width:60px;height:60px;object-fit:cover;border:2px solid #10b981}
   .thumb.err{border-color:#ef4444}
   .muted{color:#6b7280;font-size:13px}
   .controls{display:flex;gap:8px;margin-top:10px}
@@ -24,7 +24,7 @@
   <h1>Debug – purchasedBlocks.json & images</h1>
   <div class="controls">
     <button id="reload">Re-check now</button>
-    <span class="muted">Tip: With regions, structure is <code>{"cells":{...},"regions":[...]}</code>.</span>
+    <span class="muted">Format regions: <code>{"cells":{},"regions":[{"start":0,"w":3,"h":2,"imageUrl":"https://...","linkUrl":"https://..."}]}</code></span>
   </div>
   <div id="status" class="muted" style="margin-top:8px;"></div>
   <table id="tbl" style="display:none">
@@ -52,7 +52,7 @@ async function load() {
   tbody.innerHTML = '';
 
   try {
-    const res = await fetch('data/purchasedBlocks.json?ts=' + Date.now());
+    const res = await fetch('data/purchasedBlocks.json?ts=' + Date.now(), { cache:'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
 
@@ -71,7 +71,6 @@ async function load() {
     status.innerHTML = `<span class="ok">JSON OK</span> — ${cellEntries.length} cell(s), ${regEntries.length} region(s).`;
     tbl.style.display = '';
 
-    // Cells (legacy 1x1)
     for (const [idx, { imageUrl, linkUrl }] of cellEntries) {
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>cell</td><td>${idx}</td><td>1×1</td>`;
@@ -86,7 +85,6 @@ async function load() {
       tbody.appendChild(tr);
     }
 
-    // Regions
     for (const r of regEntries) {
       const tr = document.createElement('tr');
       const size = `${r.w||1}×${r.h||1}`;

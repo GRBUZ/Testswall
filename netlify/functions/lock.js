@@ -4,7 +4,7 @@ import { json } from './_common.js';
 
 const STORE = 'reservations';
 const STATE_KEY = 'state';
-const HOLD_MS = 10 * 60 * 1000; // 10 minutes
+const HOLD_MS = 3 * 60 * 1000; // 3 minutes
 
 const now = () => Date.now();
 
@@ -49,47 +49,35 @@ export default async (req) => {
     const reservationId = (body.reservationId || '').toString() || null;
     const email = (body.email || '').toString().slice(0, 200);
 
-    if (!incoming.length && op !== 'set') return json({ ok:false, error:'NO_BLOCKS' }, 400);
+    if (!incoming.length and op !== 'set') return json({ ok:false, error:'NO_BLOCKS' }, 400);
 
     const { store, state } = await readStateStrong();
 
     let rid = reservationId;
     let lock = rid ? (state.locks[rid] || null) : null;
     if (!lock) {
-      // create a new reservation only for 'add' or 'set' with non-empty selection
       if (op === 'remove') return json({ ok:false, error:'RESERVATION_NOT_FOUND' }, 404);
       rid = randomUUID();
       lock = state.locks[rid] = { blocks: [], email, createdAt: now(), expireAt: now() + HOLD_MS };
     }
 
-    // derive new block set based on op
     const current = new Set(lock.blocks || []);
     let next;
-    if (op === 'add') {
-      next = new Set([...current, ...incoming]);
-    } else if (op === 'remove') {
-      next = new Set(current);
-      for (const b of incoming) next.delete(b);
-    } else if (op === 'set') {
-      next = new Set(incoming);
-    } else {
-      return json({ ok:false, error:'BAD_OP' }, 400);
-    }
+    if (op === 'add') next = new Set([...current, ...incoming]);
+    else if (op === 'remove') { next = new Set(current); for (const b of incoming) next.delete(b); }
+    else if (op === 'set') next = new Set(incoming);
+    else return json({ ok:false, error:'BAD_OP' }, 400);
 
-    // conflicts: any new blocks (i.e., next - current) that are already taken by others
+    // conflicts on blocks you try to newly add
     const newOnes = [...next].filter(b => !current.has(b));
     const taken = takenSet(state, rid);
     const conflicts = newOnes.filter(b => taken.has(b));
-    if (conflicts.length) {
-      return json({ ok:false, error:'CONFLICT', conflicts }, 409);
-    }
+    if (conflicts.length) return json({ ok:false, error:'CONFLICT', conflicts }, 409);
 
-    // apply
     lock.blocks = Array.from(next).sort((a,b)=>a-b);
-    lock.expireAt = now() + HOLD_MS; // bump TTL on activity
+    lock.expireAt = now() + HOLD_MS; // refresh TTL
     state.locks[rid] = lock;
 
-    // if becomes empty after a remove/set, delete reservation
     if (!lock.blocks.length) {
       delete state.locks[rid];
       await store.setJSON(STATE_KEY, state);
@@ -98,11 +86,7 @@ export default async (req) => {
 
     await store.setJSON(STATE_KEY, state);
 
-    // verify visibility
-    const verify = await store.get(STATE_KEY, { type: 'json' });
-    const visible = !!verify?.locks?.[rid];
-
-    return json({ ok:true, reservationId: rid, blocks: lock.blocks, expireAt: lock.expireAt, visible });
+    return json({ ok:true, reservationId: rid, blocks: lock.blocks, expireAt: lock.expireAt });
   } catch (e) {
     console.error('lock error', e);
     return json({ ok:false, error:'SERVER_ERROR', message: e?.message || String(e) }, 500);

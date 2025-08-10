@@ -4,24 +4,32 @@ import { json } from './_common.js';
 const STORE = 'reservations';
 const STATE_KEY = 'state';
 
+const now = () => Date.now();
+
 export default async () => {
   try {
     const store = getStore(STORE, { consistency: 'strong' });
     const state = (await store.get(STATE_KEY, { type: 'json' })) || { sold: {}, locks: {} };
 
-    const now = Date.now();
-    const pending = new Set();
+    // prune expired and persist
+    let mutated = false;
+    const t = now();
     for (const [rid, lock] of Object.entries(state.locks || {})) {
-      if (lock?.expireAt > now) for (const b of (lock.blocks || [])) pending.add(+b);
+      if (!lock?.expireAt || lock.expireAt <= t) { delete state.locks[rid]; mutated = true; }
+    }
+    if (mutated) await store.setJSON(STATE_KEY, state);
+
+    const pending = new Set();
+    for (const lock of Object.values(state.locks || {})) {
+      if (lock?.expireAt > t) for (const b of (lock.blocks || [])) pending.add(+b);
     }
     const sold = Object.keys(state.sold || {}).map(n => +n);
 
     return json({
       ok: true,
-      now,
+      now: t,
       pending: Array.from(pending),
       sold,
-      // Include locks for diagnostics (no sensitive data)
       locks: Object.fromEntries(Object.entries(state.locks || {}).map(([id, l]) => [id, { blocks: l.blocks, expireAt: l.expireAt }]))
     });
   } catch (e) {

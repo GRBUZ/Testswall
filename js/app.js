@@ -1,9 +1,9 @@
-// === Reserve-on-click: fix regression ===
-// Key changes:
-// - Track your own reserved blocks in myReservedSet
-// - Pending blocks that are YOURS stay clickable (to remove)
-// - Buy button uses myReservedSet (not DOM .selected which gets re-rendered)
-// - Deterministic 10k-cell grid
+// === Reserve-on-click + 3-min expiry + robust unlock on exit ===
+// - DATA_VERSION bumped to 13 (cache bust)
+// - Polling at 1s for near-instant updates
+// - navigator.sendBeacon to unlock on tab close
+// - Keep track of myReservedSet + reservationId (persist in localStorage)
+// - Deterministic grid (10k cells)
 
 const grid = document.getElementById('pixelGrid');
 const regionsLayer = document.getElementById('regionsLayer');
@@ -17,19 +17,18 @@ const pixelsLeftEl = document.getElementById('pixelsLeft');
 const paymentUrl = 'https://paypal.me/YourUSAccount'; // TODO
 
 const TOTAL_PIXELS = 1_000_000;
-const DATA_VERSION = 6;
+const DATA_VERSION = 13;
 const GRID_SIZE = 100;
 const CELL_PX = 10;
-const STATUS_POLL_MS = 3000;
+const STATUS_POLL_MS = 1000;
 
 let cellsMap = {};
 let regions = [];
 let pendingSet = new Set();     // all pending (everyone)
-let myReservedSet = new Set();  // only my reservation blocks
-let activeReservationId = null;
+let myReservedSet = new Set();  // only my reserved blocks
+let activeReservationId = localStorage.getItem('iw_reservation_id') || null;
 let lastStatusAt = 0;
 
-/* ---------- Pricing ---------- */
 function committedSoldSet() {
   const set = new Set();
   for (const k of Object.keys(cellsMap)) set.add(+k);
@@ -48,11 +47,18 @@ function formatUSD(n) { return '$' + n.toFixed(2); }
 function refreshHeaderPricing() { priceLine.textContent = `1 Pixel = ${formatUSD(getCurrentPixelPrice())}`; }
 function refreshPixelsLeft() { const left = TOTAL_PIXELS - getBlocksSold() * 100; pixelsLeftEl.textContent = `${left.toLocaleString()} pixels left`; }
 
-/* ---------- Data ---------- */
 async function loadStatus() {
-  try { const r = await fetch('/.netlify/functions/status', { cache:'no-store' }); const s = await r.json(); pendingSet = new Set((s && s.pending) || []); lastStatusAt = Date.now(); } catch {}
+  try {
+    const r = await fetch('/.netlify/functions/status', { cache:'no-store' });
+    const s = await r.json();
+    pendingSet = new Set((s && s.pending) || []);
+    lastStatusAt = Date.now();
+  } catch (e) {
+    console.warn('status fetch failed', e);
+  }
 }
-async function maybeRefreshStatus(maxAgeMs = 1000) { if (Date.now() - lastStatusAt > maxAgeMs) await loadStatus(); }
+async function maybeRefreshStatus(maxAgeMs = 500) { if (Date.now() - lastStatusAt > maxAgeMs) await loadStatus(); }
+
 async function loadData() {
   const r = await fetch(`data/purchasedBlocks.json?v=${DATA_VERSION}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching purchasedBlocks.json`);
@@ -61,7 +67,6 @@ async function loadData() {
   else { cellsMap = data || {}; regions = []; }
 }
 
-/* ---------- UI ---------- */
 function renderGrid() {
   const sold = committedSoldSet();
 
@@ -78,15 +83,12 @@ function renderGrid() {
     if (isSold) {
       el.classList.add('sold'); el.title = 'Sold';
     } else if (isMine) {
-      // Your own reserved block: keep clickable to REMOVE
       el.classList.add('pending', 'selected');
       el.title = 'Your selection (reserved)';
       el.addEventListener('click', () => removeOne(i));
     } else if (isPending) {
-      // Someone else’s pending: non-clickable
       el.classList.add('pending'); el.title = 'Reserved (pending)';
     } else {
-      // Free: clickable to ADD
       el.addEventListener('click', () => addOne(i));
     }
     grid.appendChild(el);
@@ -118,7 +120,6 @@ function renderGrid() {
   updateBuyButtonLabel();
 }
 
-/* ---------- Add / Remove helpers ---------- */
 async function addOne(idx) {
   await maybeRefreshStatus(0);
   const sold = committedSoldSet();
@@ -130,20 +131,16 @@ async function addOne(idx) {
       body: JSON.stringify({ op:'add', blocks:[idx], reservationId: activeReservationId || undefined })
     });
     const res = await r.json();
-    if (!r.ok) {
-      if (r.status === 409) { await loadStatus(); renderGrid(); return; }
-      throw new Error(res.error || ('HTTP '+r.status));
-    }
+    if (!r.ok) { if (r.status === 409) { await loadStatus(); renderGrid(); return; } throw new Error(res.error || ('HTTP '+r.status)); }
     activeReservationId = res.reservationId || activeReservationId;
-    // Trust server state: use returned array of blocks for my selection
+    localStorage.setItem('iw_reservation_id', activeReservationId);
     myReservedSet = new Set(res.blocks || []);
-    // Also mark globally pending
     for (const b of myReservedSet) pendingSet.add(b);
+    localStorage.setItem('iw_my_blocks', JSON.stringify(Array.from(myReservedSet)));
     renderGrid();
-  } catch (e) {
-    alert('Reservation error: ' + e.message);
-  }
+  } catch (e) { alert('Reservation error: ' + e.message); }
 }
+
 async function removeOne(idx) {
   try {
     const r = await fetch('/.netlify/functions/lock', {
@@ -154,27 +151,19 @@ async function removeOne(idx) {
     const res = await r.json();
     if (!r.ok) throw new Error(res.error || ('HTTP '+r.status));
     if (!res.reservationId) {
-      // Reservation deleted (empty)
-      activeReservationId = null;
-      myReservedSet = new Set();
-      await loadStatus();
-      renderGrid();
-      return;
+      // Reservation deleted
+      activeReservationId = null; localStorage.removeItem('iw_reservation_id');
+      myReservedSet = new Set(); localStorage.removeItem('iw_my_blocks');
+      await loadStatus(); renderGrid(); return;
     }
-    myReservedSet = new Set(res.blocks || []);
-    // Sync pending with server list (remove idx at least)
-    pendingSet.delete(idx);
-    // But keep other pending we might have
-    for (const b of myReservedSet) pendingSet.add(b);
+    activeReservationId = res.reservationId; localStorage.setItem('iw_reservation_id', activeReservationId);
+    myReservedSet = new Set(res.blocks || []); localStorage.setItem('iw_my_blocks', JSON.stringify(Array.from(myReservedSet)));
+    pendingSet = new Set([...pendingSet].filter(b => b !== idx)); for (const b of myReservedSet) pendingSet.add(b);
     renderGrid();
-  } catch (e) {
-    alert('Unreserve error: ' + e.message);
-  }
+  } catch (e) { alert('Unreserve error: ' + e.message); }
 }
 
-/* ---------- Buy / Cancel ---------- */
 function selectedCount() { return myReservedSet.size; }
-
 function updateBuyButtonLabel() {
   const count = selectedCount();
   if (count === 0) buyButton.textContent = 'Buy Pixels';
@@ -198,14 +187,12 @@ async function onCancel() {
         body: JSON.stringify({ reservationId: activeReservationId })
       });
     } catch {}
-    activeReservationId = null;
-    myReservedSet = new Set();
-    await loadStatus();
-    renderGrid();
+    activeReservationId = null; localStorage.removeItem('iw_reservation_id');
+    myReservedSet = new Set(); localStorage.removeItem('iw_my_blocks');
+    await loadStatus(); renderGrid();
   }
 }
 
-// Netlify: store submission, then redirect to PayPal
 influencerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = new FormData(influencerForm);
@@ -216,9 +203,13 @@ influencerForm.addEventListener('submit', async (e) => {
   window.location.href = `${paymentUrl}/${total}?note=${note}`;
 });
 
-/* ---------- Init ---------- */
 (async () => {
   try { await Promise.all([loadData(), loadStatus()]); } catch (e) { alert('Init failed: ' + e.message); }
+  // Restore my selection from storage (best effort)
+  try {
+    const saved = JSON.parse(localStorage.getItem('iw_my_blocks') || '[]');
+    if (Array.isArray(saved)) myReservedSet = new Set(saved.map(n=>+n).filter(n=>Number.isInteger(n)));
+  } catch {}
   document.title = `Influencers Wall – ${getBlocksSold()} blocks sold`;
   renderGrid(); refreshHeaderPricing(); refreshPixelsLeft(); updateBuyButtonLabel();
 
@@ -234,14 +225,12 @@ influencerForm.addEventListener('submit', async (e) => {
   }, STATUS_POLL_MS);
 })();
 
-// Free reservation if tab closes (best effort)
-window.addEventListener('pagehide', async () => {
+// Robust unlock on exit using sendBeacon
+window.addEventListener('pagehide', () => {
   if (!activeReservationId) return;
   try {
-    await fetch('/.netlify/functions/unlock', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ reservationId: activeReservationId })
-    });
+    const payload = JSON.stringify({ reservationId: activeReservationId });
+    const blob = new Blob([payload], { type: 'application/json' });
+    navigator.sendBeacon('/.netlify/functions/unlock', blob);
   } catch {}
 });
