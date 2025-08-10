@@ -229,10 +229,11 @@ influencerForm.addEventListener('submit', async (e) => {
     console.error('Netlify form post failed:', err);
   }
   // Keep reservation until payment webhook converts to SOLD or expires
-  const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean);
-  const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;
-  const note = `blocks-${blocks.join(',')}`;
-  window.location.href = `${paymentUrl}/${total}?note=${note}`;
+  //const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
+  //const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;juste pour enlever le paiement (enleve le comment apres)
+  //const note = `blocks-${blocks.join(',')}`;juste pour enlever le paiement (enleve le comment apres)
+  //window.location.href = `${paymentUrl}/${total}?note=${note}`;juste pour enlever le paiement (enleve le comment apres)
+    window.location.href = influencerForm.action || '/success.html'; // test: page de succès
 });
 
 function updateBuyButtonLabel() {
