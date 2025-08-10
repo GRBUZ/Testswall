@@ -1,8 +1,9 @@
-// === Influencers Wall – Frontend reservations patch ===
-// - Marks blocks as PENDING immediately after lock()
-// - Polls server every 10s to refresh pending from other users
-// - Unlocks on cancel and on pagehide (tab close)
-// - Avoids attaching duplicate event listeners
+// === Influencers Wall – Reservations hardening patch ===
+// Goals:
+// - Prevent selecting blocks that just became PENDING (pre-check on click)
+// - Faster polling (3s) to catch other users quickly
+// - Cross-tab sync via localStorage (instant within same browser)
+// - Keep single binding for event listeners
 
 const grid = document.getElementById('pixelGrid');
 const regionsLayer = document.getElementById('regionsLayer');
@@ -19,6 +20,7 @@ const TOTAL_PIXELS = 1_000_000; // 100x100 blocks * 100 pixels each
 const DATA_VERSION = 6; // JSON cache buster (unchanged here)
 const GRID_SIZE = 100;
 const CELL_PX = 10;
+const STATUS_POLL_MS = 3000;
 
 // Data holders (back-compat: either legacy map or new {cells, regions})
 let cellsMap = {};   // {"50": {imageUrl, linkUrl}, ...}
@@ -26,6 +28,7 @@ let regions = [];    // [{start, w, h, imageUrl, linkUrl}, ...]
 let pendingSet = new Set(); // blocks reserved by others (server) or by us (optimistic)
 let activeReservationId = null;
 let activeReservedBlocks = [];
+let lastStatusAt = 0;
 
 /* ---------- Pricing ( +$0.01 per 1,000 pixels => every 10 blocks ) ---------- */
 function calcSoldSetCommittedOnly() {
@@ -66,8 +69,14 @@ async function loadStatus() {
     const r = await fetch('/.netlify/functions/status', { cache: 'no-store' });
     const s = await r.json();
     pendingSet = new Set(s.pending || []);
+    lastStatusAt = Date.now();
   } catch (e) {
     console.warn('status fetch failed', e);
+  }
+}
+async function maybeRefreshStatus(maxAgeMs = 1000) {
+  if (Date.now() - lastStatusAt > maxAgeMs) {
+    await loadStatus();
   }
 }
 
@@ -95,7 +104,13 @@ function renderGrid() {
     const block = document.createElement('div');
     block.className = 'block';
     block.dataset.index = i;
-    block.addEventListener('click', () => {
+    block.addEventListener('click', async () => {
+      const idx = parseInt(block.dataset.index);
+      // Fast deny if our cache already shows pending
+      if (pendingSet.has(idx)) { alert('This block was just reserved.'); renderGrid(); return; }
+      // Re-check server (fresh) before letting user select
+      await maybeRefreshStatus(0);
+      if (pendingSet.has(idx)) { alert('This block was just reserved.'); renderGrid(); return; }
       block.classList.toggle('selected');
       updateBuyButtonLabel();
     });
@@ -150,7 +165,14 @@ async function onBuyClick() {
   const selected = selectedIndices();
   if (!selected.length) { alert('Please select at least one free block.'); return; }
 
-  // Try to lock on server
+  // Double-check with server before attempting lock
+  await maybeRefreshStatus(0);
+  const conflictLocal = selected.filter(b => pendingSet.has(b));
+  if (conflictLocal.length) {
+    alert('Some blocks were just reserved: ' + conflictLocal.join(', '));
+    renderGrid(); updateBuyButtonLabel(); return;
+  }
+
   try {
     const r = await fetch('/.netlify/functions/lock', {
       method: 'POST',
@@ -176,6 +198,11 @@ async function onBuyClick() {
     renderGrid();
     updateBuyButtonLabel();
 
+    // Cross-tab broadcast (same browser)
+    try {
+      localStorage.setItem('iw_pending_update', JSON.stringify({ op: 'add', blocks: selected, ts: Date.now() }));
+    } catch {}
+
     // Open form
     infoForm.classList.remove('hidden');
     document.getElementById('blockIndex').value = selected.join(',');
@@ -189,6 +216,9 @@ async function onCancel() {
   // Optimistically free locally
   for (const b of activeReservedBlocks) pendingSet.delete(b);
   renderGrid(); updateBuyButtonLabel();
+
+  // Cross-tab broadcast
+  try { localStorage.setItem('iw_pending_update', JSON.stringify({ op: 'remove', blocks: activeReservedBlocks, ts: Date.now() })); } catch {}
 
   // Unlock reservation if we created one
   if (activeReservationId) {
@@ -216,8 +246,7 @@ influencerForm.addEventListener('submit', async (e) => {
     console.error('Netlify form post failed:', err);
   }
   // Keep reservation until payment webhook converts to SOLD or expires
-  
-  //const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
+//const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
   //const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;juste pour enlever le paiement (enleve le comment apres)
   //const note = `blocks-${blocks.join(',')}`;juste pour enlever le paiement (enleve le comment apres)
   //window.location.href = `${paymentUrl}/${total}?note=${note}`;juste pour enlever le paiement (enleve le comment apres)
@@ -250,13 +279,26 @@ function updateBuyButtonLabel() {
   contactButton.addEventListener('click', () => { window.location.href = 'mailto:you@domain.com'; });
   cancelForm.addEventListener('click', onCancel);
 
-  // Poll server every 10s to keep pending locks fresh for everyone
+  // Poll server every 3s to keep pending locks fresh for everyone
   setInterval(async () => {
     const before = JSON.stringify([...pendingSet].sort());
     await loadStatus();
     const after = JSON.stringify([...pendingSet].sort());
     if (before !== after) { renderGrid(); updateBuyButtonLabel(); }
-  }, 10000);
+  }, STATUS_POLL_MS);
+
+  // Cross-tab (same browser) instant sync
+  window.addEventListener('storage', (e) => {
+    if (e.key !== 'iw_pending_update' || !e.newValue) return;
+    try {
+      const { op, blocks } = JSON.parse(e.newValue);
+      if (Array.isArray(blocks)) {
+        if (op === 'add') blocks.forEach(b => pendingSet.add(b));
+        if (op === 'remove') blocks.forEach(b => pendingSet.delete(b));
+        renderGrid(); updateBuyButtonLabel();
+      }
+    } catch {}
+  });
 })();
 
 // Free reservation if tab closes
