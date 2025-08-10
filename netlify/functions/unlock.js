@@ -13,8 +13,8 @@ export default async (req) => {
     const rid = (body.reservationId || '').toString();
     if (!rid) return json({ ok:false, error:'MISSING_ID' }, 400);
 
-    const store = getStore(STORE, { consistency: 'strong' });
-    const state = await store.getJSON(STATE_KEY) || { sold: {}, locks: {} };
+    const store = getStore(STORE);
+    const state = (await store.get(STATE_KEY, { type: 'json', consistency: 'strong' })) || { sold: {}, locks: {} };
 
     if (state.locks && state.locks[rid]) {
       delete state.locks[rid];
@@ -24,6 +24,6 @@ export default async (req) => {
     return json({ ok:false, error:'NOT_FOUND' }, 404);
   } catch (e) {
     console.error('unlock error', e);
-    return json({ ok:false, error:'SERVER_ERROR' }, 500);
+    return json({ ok:false, error:'SERVER_ERROR', message: e?.message || String(e) }, 500);
   }
 };

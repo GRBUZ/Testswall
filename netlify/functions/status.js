@@ -6,8 +6,8 @@ const STATE_KEY = 'state';
 
 export default async () => {
   try {
-    const store = getStore(STORE, { consistency: 'strong' });
-    const state = await store.getJSON(STATE_KEY) || { sold: {}, locks: {} };
+    const store = getStore(STORE);
+    const state = (await store.get(STATE_KEY, { type: 'json', consistency: 'strong' })) || { sold: {}, locks: {} };
 
     const now = Date.now();
     const pending = new Set();
@@ -16,14 +16,9 @@ export default async () => {
     }
     const sold = Object.keys(state.sold || {}).map(n => +n);
 
-    return json({
-      ok: true,
-      now,
-      pending: Array.from(pending),
-      sold
-    });
+    return json({ ok: true, now, pending: Array.from(pending), sold });
   } catch (e) {
     console.error('status error', e);
-    return json({ ok:false, error:'SERVER_ERROR' }, 500);
+    return json({ ok:false, error:'SERVER_ERROR', message: e?.message || String(e) }, 500);
   }
 };
