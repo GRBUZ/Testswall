@@ -1,6 +1,8 @@
-// === Deterministic grid patch ===
-// Always render all 10,000 cells; mark SOLD/PENDING with classes (non-clickable).
-// Prevents any mismatch between visual position and block index.
+// === Reserve-on-click frontend patch ===
+// - Clicking a free block immediately calls the lock function (op:add) and marks it PENDING if success.
+// - Clicking again (selected) removes it from the reservation (op:remove).
+// - No more "select then reserve later": reservation exists as you select.
+// - Uses a single reservationId per session until cancel/submit.
 
 const grid = document.getElementById('pixelGrid');
 const regionsLayer = document.getElementById('regionsLayer');
@@ -23,10 +25,8 @@ let cellsMap = {};
 let regions = [];
 let pendingSet = new Set();
 let activeReservationId = null;
-let activeReservedBlocks = [];
 let lastStatusAt = 0;
 
-/* ---------- Pricing ---------- */
 function committedSoldSet() {
   const set = new Set();
   for (const k of Object.keys(cellsMap)) set.add(+k);
@@ -37,36 +37,18 @@ function committedSoldSet() {
   }
   return set;
 }
-function takenSet() {
-  const set = committedSoldSet();
-  for (const b of pendingSet) set.add(+b);
-  return set;
-}
+function takenSet() { const s = committedSoldSet(); for (const b of pendingSet) s.add(+b); return s; }
 function getBlocksSold() { return committedSoldSet().size; }
-function getCurrentPixelPrice() {
-  const steps = Math.floor(getBlocksSold() / 10);
-  return Math.round((1 + steps * 0.01) * 100) / 100;
-}
+function getCurrentPixelPrice() { const steps = Math.floor(getBlocksSold() / 10); return Math.round((1 + steps * 0.01) * 100) / 100; }
 function getCurrentBlockPrice() { return Math.round(getCurrentPixelPrice() * 100 * 100) / 100; }
 function formatUSD(n) { return '$' + n.toFixed(2); }
 function refreshHeaderPricing() { priceLine.textContent = `1 Pixel = ${formatUSD(getCurrentPixelPrice())}`; }
-function refreshPixelsLeft() {
-  const left = TOTAL_PIXELS - getBlocksSold() * 100;
-  pixelsLeftEl.textContent = `${left.toLocaleString()} pixels left`;
-}
+function refreshPixelsLeft() { const left = TOTAL_PIXELS - getBlocksSold() * 100; pixelsLeftEl.textContent = `${left.toLocaleString()} pixels left`; }
 
-/* ---------- Data ---------- */
 async function loadStatus() {
-  try {
-    const r = await fetch('/.netlify/functions/status', { cache: 'no-store' });
-    const s = await r.json();
-    pendingSet = new Set((s && s.pending) || []);
-    lastStatusAt = Date.now();
-  } catch {}
+  try { const r = await fetch('/.netlify/functions/status', { cache:'no-store' }); const s = await r.json(); pendingSet = new Set((s && s.pending) || []); lastStatusAt = Date.now(); } catch {}
 }
-async function maybeRefreshStatus(maxAgeMs = 1000) {
-  if (Date.now() - lastStatusAt > maxAgeMs) await loadStatus();
-}
+async function maybeRefreshStatus(maxAgeMs = 1000) { if (Date.now() - lastStatusAt > maxAgeMs) await loadStatus(); }
 async function loadData() {
   const r = await fetch(`data/purchasedBlocks.json?v=${DATA_VERSION}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching purchasedBlocks.json`);
@@ -75,7 +57,6 @@ async function loadData() {
   else { cellsMap = data || {}; regions = []; }
 }
 
-/* ---------- UI ---------- */
 function renderGrid() {
   const taken = takenSet();
   const sold = committedSoldSet();
@@ -87,18 +68,47 @@ function renderGrid() {
     el.dataset.index = i;
 
     if (sold.has(i)) {
-      el.classList.add('sold');
-      el.title = 'Sold';
-      // Sold blocks are not clickable
+      el.classList.add('sold'); el.title = 'Sold';
     } else if (pendingSet.has(i)) {
-      el.classList.add('pending');
-      el.title = 'Reserved (pending)';
-      // Pending blocks are not clickable
+      el.classList.add('pending'); el.title = 'Reserved (pending)';
     } else {
-      // Free: clickable to select
-      el.addEventListener('click', () => {
-        el.classList.toggle('selected');
-        updateBuyButtonLabel();
+      // Reserve-on-click
+      el.addEventListener('click', async () => {
+        const idx = parseInt(el.dataset.index);
+        await maybeRefreshStatus(0);
+        if (pendingSet.has(idx) || sold.has(idx)) { renderGrid(); return; }
+
+        const isSelected = el.classList.contains('selected');
+        const op = isSelected ? 'remove' : 'add';
+
+        try {
+          const r = await fetch('/.netlify/functions/lock', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ op, blocks: [idx], reservationId: activeReservationId || undefined })
+          });
+          const res = await r.json();
+          if (!r.ok) {
+            if (r.status === 409 && res.conflicts) {
+              alert('Just reserved by someone else.');
+              await loadStatus(); renderGrid(); return;
+            }
+            throw new Error(res.error || ('HTTP '+r.status));
+          }
+          // Created or updated reservation
+          activeReservationId = res.reservationId || activeReservationId;
+
+          if (op === 'add') {
+            pendingSet.add(idx);
+            el.classList.add('selected');
+          } else {
+            pendingSet.delete(idx);
+            el.classList.remove('selected');
+          }
+          renderGrid(); updateBuyButtonLabel();
+        } catch (e) {
+          alert('Reservation error: ' + e.message);
+        }
       });
     }
     grid.appendChild(el);
@@ -111,9 +121,10 @@ function renderGrid() {
     const row = Math.floor(idx / GRID_SIZE), col = idx % GRID_SIZE;
     const a = document.createElement('a');
     a.href = info.linkUrl || '#'; a.target = '_blank'; a.className = 'region';
-    a.style.left = (col * CELL_PX) + 'px'; a.style.top = (row * CELL_PX) + 'px';
-    a.style.width = CELL_PX + 'px'; a.style.height = CELL_PX + 'px';
-    a.style.backgroundImage = `url(${info.imageUrl})`; a.title = info.linkUrl || '';
+    a.style.left = (col * 10) + 'px'; a.style.top = (row * 10) + 'px';
+    a.style.width = '10px'; a.style.height = '10px';
+    a.style.backgroundImage = `url(${info.imageUrl})`;
+    a.title = info.linkUrl || '';
     regionsLayer.appendChild(a);
   }
   for (const r of regions) {
@@ -121,64 +132,35 @@ function renderGrid() {
     const row = Math.floor(start / GRID_SIZE), col = start % GRID_SIZE;
     const a = document.createElement('a');
     a.href = r.linkUrl || '#'; a.target = '_blank'; a.className = 'region';
-    a.style.left = (col * CELL_PX) + 'px'; a.style.top = (row * CELL_PX) + 'px';
-    a.style.width = (w * CELL_PX) + 'px'; a.style.height = (h * CELL_PX) + 'px';
+    a.style.left = (col * 10) + 'px'; a.style.top = (row * 10) + 'px';
+    a.style.width = (w * 10) + 'px'; a.style.height = (h * 10) + 'px';
     a.style.backgroundImage = `url(${r.imageUrl})`; a.title = r.linkUrl || '';
     regionsLayer.appendChild(a);
   }
 }
 
-function selectedIndices() {
-  return Array.from(document.querySelectorAll('.block.selected')).map(el => parseInt(el.dataset.index));
+function selectedCount() {
+  // Selected = blocks in our active reservation that we also mark with .selected locally.
+  return document.querySelectorAll('.block.selected').length;
+}
+
+function updateBuyButtonLabel() {
+  const count = selectedCount();
+  if (count === 0) buyButton.textContent = 'Buy Pixels';
+  else buyButton.textContent = `Buy ${count} block${count>1?'s':''} (${count*100} px) – ${formatUSD(getCurrentBlockPrice()*count)}`;
 }
 
 async function onBuyClick() {
-  const selected = selectedIndices();
-  if (!selected.length) { alert('Please select at least one free block.'); return; }
-
-  // Server-side recheck before reserve
-  await maybeRefreshStatus(0);
-  const conflicts = selected.filter(b => pendingSet.has(b) || committedSoldSet().has(b));
-  if (conflicts.length) {
-    alert('Some blocks just got taken: ' + conflicts.join(', '));
-    renderGrid(); updateBuyButtonLabel(); return;
-  }
-
-  try {
-    const r = await fetch('/.netlify/functions/lock', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ blocks: selected })
-    });
-    const res = await r.json();
-    if (!r.ok) {
-      if (r.status === 409 && res.conflicts) {
-        alert('Some blocks just got reserved by someone else: ' + res.conflicts.join(', '));
-        await loadStatus(); renderGrid(); updateBuyButtonLabel(); return;
-      }
-      throw new Error(res.error || ('HTTP '+r.status));
-    }
-
-    activeReservationId = res.reservationId;
-    activeReservedBlocks = selected.slice();
-
-    // Optimistic: mark as pending locally
-    for (const b of selected) pendingSet.add(b);
-    renderGrid(); updateBuyButtonLabel();
-
-    // Show form
-    infoForm.classList.remove('hidden');
-    document.getElementById('blockIndex').value = selected.join(',');
-  } catch (e) {
-    alert('Could not reserve blocks: ' + e.message);
-  }
+  const count = selectedCount();
+  if (!activeReservationId || count === 0) { alert('Please select blocks first.'); return; }
+  infoForm.classList.remove('hidden');
+  // Fill hidden field with current selected indices
+  const selected = Array.from(document.querySelectorAll('.block.selected')).map(el => parseInt(el.dataset.index));
+  document.getElementById('blockIndex').value = selected.join(',');
 }
 
 async function onCancel() {
   infoForm.classList.add('hidden');
-  for (const b of activeReservedBlocks) pendingSet.delete(b);
-  renderGrid(); updateBuyButtonLabel();
-
   if (activeReservationId) {
     try {
       await fetch('/.netlify/functions/unlock', {
@@ -188,28 +170,25 @@ async function onCancel() {
       });
     } catch {}
     activeReservationId = null;
-    activeReservedBlocks = [];
+    // clear our local selections
+    pendingSet = new Set();
+    renderGrid(); updateBuyButtonLabel();
     await loadStatus(); renderGrid(); updateBuyButtonLabel();
   }
 }
 
+// Netlify: store submission, then redirect to PayPal
 influencerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = new FormData(influencerForm);
   try { await fetch(influencerForm.action || '/', { method: 'POST', body: data }); } catch {}
-  
+  // Keep reservation until payment webhook converts to SOLD or expires
   //const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
   //const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;juste pour enlever le paiement (enleve le comment apres)
   //const note = `blocks-${blocks.join(',')}`;juste pour enlever le paiement (enleve le comment apres)
   //window.location.href = `${paymentUrl}/${total}?note=${note}`;juste pour enlever le paiement (enleve le comment apres)
     window.location.href = influencerForm.action || '/success.html'; // test: page de succès
 });
-
-function updateBuyButtonLabel() {
-  const count = selectedIndices().length;
-  if (count === 0) buyButton.textContent = 'Buy Pixels';
-  else buyButton.textContent = `Buy ${count} block${count>1?'s':''} (${count*100} px) – ${formatUSD(getCurrentBlockPrice()*count)}`;
-}
 
 /* ---------- Init ---------- */
 (async () => {
@@ -221,6 +200,7 @@ function updateBuyButtonLabel() {
   contactButton.addEventListener('click', () => { window.location.href = 'mailto:you@domain.com'; });
   cancelForm.addEventListener('click', onCancel);
 
+  // Poll server to keep pendingSet in sync across users
   setInterval(async () => {
     const before = JSON.stringify([...pendingSet].sort());
     await loadStatus();
@@ -229,7 +209,7 @@ function updateBuyButtonLabel() {
   }, STATUS_POLL_MS);
 })();
 
-// Optional: free reservation if tab closes
+// Free reservation if tab closes
 window.addEventListener('pagehide', async () => {
   if (!activeReservationId) return;
   try {

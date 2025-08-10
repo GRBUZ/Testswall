@@ -8,10 +8,12 @@ const HOLD_MS = 10 * 60 * 1000; // 10 minutes
 
 const now = () => Date.now();
 
-async function readState() {
-  // Force strong consistency at store level
+function normalizeBlocks(list) {
+  return Array.from(new Set((list || []).map(n => parseInt(n)).filter(n => Number.isInteger(n) && n >= 0 && n < 10000)));
+}
+
+async function readStateStrong() {
   const store = getStore(STORE, { consistency: 'strong' });
-  // Use get(..., { type:'json' }) per API
   const state = (await store.get(STATE_KEY, { type: 'json' })) || { sold: {}, locks: {} };
   // prune expired
   const t = now();
@@ -26,13 +28,14 @@ async function readState() {
   return { store, state };
 }
 
-function buildTaken(state) {
-  const taken = new Set(Object.keys(state.sold || {}).map(n => +n));
+function takenSet(state, excludeRid = null) {
+  const set = new Set(Object.keys(state.sold || {}).map(n => +n));
   const t = now();
-  for (const lock of Object.values(state.locks || {})) {
-    if (lock?.expireAt > t) for (const b of (lock.blocks || [])) taken.add(+b);
+  for (const [rid, lock] of Object.entries(state.locks || {})) {
+    if (excludeRid && rid === excludeRid) continue;
+    if (lock?.expireAt > t) for (const b of (lock.blocks || [])) set.add(+b);
   }
-  return taken;
+  return set;
 }
 
 export default async (req) => {
@@ -41,29 +44,65 @@ export default async (req) => {
     if (req.method !== 'POST') return json({ ok:false, error:'METHOD_NOT_ALLOWED' }, 405);
 
     const body = await req.json().catch(() => ({}));
-    const blocks = (body.blocks || []).map(n => parseInt(n)).filter(n => Number.isInteger(n) && n >= 0 && n < 10000);
+    const op = (body.op || 'add').toLowerCase(); // 'add' | 'remove' | 'set'
+    const incoming = normalizeBlocks(body.blocks);
+    const reservationId = (body.reservationId || '').toString() || null;
     const email = (body.email || '').toString().slice(0, 200);
 
-    if (!blocks.length) return json({ ok:false, error:'NO_BLOCKS' }, 400);
+    if (!incoming.length && op !== 'set') return json({ ok:false, error:'NO_BLOCKS' }, 400);
 
-    const { store, state } = await readState();
-    const taken = buildTaken(state);
-    const conflicts = blocks.filter(b => taken.has(b));
-    if (conflicts.length) {
-      const pending = [];
-      const sold = [];
-      for (const b of conflicts) (state.sold && state.sold[b]) ? sold.push(b) : pending.push(b);
-      return json({ ok:false, error:'CONFLICT', conflicts, pending, sold }, 409);
+    const { store, state } = await readStateStrong();
+
+    let rid = reservationId;
+    let lock = rid ? (state.locks[rid] || null) : null;
+    if (!lock) {
+      // create a new reservation only for 'add' or 'set' with non-empty selection
+      if (op === 'remove') return json({ ok:false, error:'RESERVATION_NOT_FOUND' }, 404);
+      rid = randomUUID();
+      lock = state.locks[rid] = { blocks: [], email, createdAt: now(), expireAt: now() + HOLD_MS };
     }
 
-    const rid = randomUUID();
-    const expireAt = now() + HOLD_MS;
-    state.locks[rid] = { blocks, email, createdAt: now(), expireAt };
+    // derive new block set based on op
+    const current = new Set(lock.blocks || []);
+    let next;
+    if (op === 'add') {
+      next = new Set([...current, ...incoming]);
+    } else if (op === 'remove') {
+      next = new Set(current);
+      for (const b of incoming) next.delete(b);
+    } else if (op === 'set') {
+      next = new Set(incoming);
+    } else {
+      return json({ ok:false, error:'BAD_OP' }, 400);
+    }
+
+    // conflicts: any new blocks (i.e., next - current) that are already taken by others
+    const newOnes = [...next].filter(b => !current.has(b));
+    const taken = takenSet(state, rid);
+    const conflicts = newOnes.filter(b => taken.has(b));
+    if (conflicts.length) {
+      return json({ ok:false, error:'CONFLICT', conflicts }, 409);
+    }
+
+    // apply
+    lock.blocks = Array.from(next).sort((a,b)=>a-b);
+    lock.expireAt = now() + HOLD_MS; // bump TTL on activity
+    state.locks[rid] = lock;
+
+    // if becomes empty after a remove/set, delete reservation
+    if (!lock.blocks.length) {
+      delete state.locks[rid];
+      await store.setJSON(STATE_KEY, state);
+      return json({ ok:true, reservationId: null, blocks: [] });
+    }
+
     await store.setJSON(STATE_KEY, state);
 
-    // Re-read immediately to ensure visibility
+    // verify visibility
     const verify = await store.get(STATE_KEY, { type: 'json' });
-    return json({ ok:true, reservationId: rid, expireAt, visible: !!verify?.locks?.[rid] });
+    const visible = !!verify?.locks?.[rid];
+
+    return json({ ok:true, reservationId: rid, blocks: lock.blocks, expireAt: lock.expireAt, visible });
   } catch (e) {
     console.error('lock error', e);
     return json({ ok:false, error:'SERVER_ERROR', message: e?.message || String(e) }, 500);
