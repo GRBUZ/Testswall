@@ -1,9 +1,6 @@
-// === Influencers Wall – Reservations hardening patch ===
-// Goals:
-// - Prevent selecting blocks that just became PENDING (pre-check on click)
-// - Faster polling (3s) to catch other users quickly
-// - Cross-tab sync via localStorage (instant within same browser)
-// - Keep single binding for event listeners
+// === Deterministic grid patch ===
+// Always render all 10,000 cells; mark SOLD/PENDING with classes (non-clickable).
+// Prevents any mismatch between visual position and block index.
 
 const grid = document.getElementById('pixelGrid');
 const regionsLayer = document.getElementById('regionsLayer');
@@ -14,46 +11,41 @@ const influencerForm = document.getElementById('influencerForm');
 const cancelForm = document.getElementById('cancelForm');
 const priceLine = document.getElementById('priceLine');
 const pixelsLeftEl = document.getElementById('pixelsLeft');
-const paymentUrl = 'https://paypal.me/YourUSAccount'; // TODO: set yours
+const paymentUrl = 'https://paypal.me/YourUSAccount'; // TODO
 
-const TOTAL_PIXELS = 1_000_000; // 100x100 blocks * 100 pixels each
-const DATA_VERSION = 6; // JSON cache buster (unchanged here)
+const TOTAL_PIXELS = 1_000_000;
+const DATA_VERSION = 6;
 const GRID_SIZE = 100;
 const CELL_PX = 10;
 const STATUS_POLL_MS = 3000;
 
-// Data holders (back-compat: either legacy map or new {cells, regions})
-let cellsMap = {};   // {"50": {imageUrl, linkUrl}, ...}
-let regions = [];    // [{start, w, h, imageUrl, linkUrl}, ...]
-let pendingSet = new Set(); // blocks reserved by others (server) or by us (optimistic)
+let cellsMap = {};
+let regions = [];
+let pendingSet = new Set();
 let activeReservationId = null;
 let activeReservedBlocks = [];
 let lastStatusAt = 0;
 
-/* ---------- Pricing ( +$0.01 per 1,000 pixels => every 10 blocks ) ---------- */
-function calcSoldSetCommittedOnly() {
-  // committed = sold only, used for pricing
+/* ---------- Pricing ---------- */
+function committedSoldSet() {
   const set = new Set();
   for (const k of Object.keys(cellsMap)) set.add(+k);
   for (const r of regions) {
-    const start = (r.start|0);
-    const w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
+    const start = (r.start|0), w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
     const sr = Math.floor(start / GRID_SIZE), sc = start % GRID_SIZE;
     for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) set.add((sr+dy)*GRID_SIZE+(sc+dx));
   }
   return set;
 }
-function buildTakenSet() {
-  // taken = committed SOLD + PENDING reservations (cannot be selected)
-  const taken = calcSoldSetCommittedOnly();
-  for (const b of pendingSet) taken.add(b);
-  return taken;
+function takenSet() {
+  const set = committedSoldSet();
+  for (const b of pendingSet) set.add(+b);
+  return set;
 }
-function getBlocksSold() { return calcSoldSetCommittedOnly().size; } // 1 block = 100 px
+function getBlocksSold() { return committedSoldSet().size; }
 function getCurrentPixelPrice() {
-  const steps = Math.floor(getBlocksSold() / 10); // 10 blocks = 1,000 px
-  const price = 1 + steps * 0.01;
-  return Math.round(price * 100) / 100;
+  const steps = Math.floor(getBlocksSold() / 10);
+  return Math.round((1 + steps * 0.01) * 100) / 100;
 }
 function getCurrentBlockPrice() { return Math.round(getCurrentPixelPrice() * 100 * 100) / 100; }
 function formatUSD(n) { return '$' + n.toFixed(2); }
@@ -63,96 +55,75 @@ function refreshPixelsLeft() {
   pixelsLeftEl.textContent = `${left.toLocaleString()} pixels left`;
 }
 
-/* ---------------------- Load data + server status --------------------- */
+/* ---------- Data ---------- */
 async function loadStatus() {
   try {
     const r = await fetch('/.netlify/functions/status', { cache: 'no-store' });
     const s = await r.json();
-    pendingSet = new Set(s.pending || []);
+    pendingSet = new Set((s && s.pending) || []);
     lastStatusAt = Date.now();
-  } catch (e) {
-    console.warn('status fetch failed', e);
-  }
+  } catch {}
 }
 async function maybeRefreshStatus(maxAgeMs = 1000) {
-  if (Date.now() - lastStatusAt > maxAgeMs) {
-    await loadStatus();
-  }
+  if (Date.now() - lastStatusAt > maxAgeMs) await loadStatus();
 }
-
 async function loadData() {
   const r = await fetch(`data/purchasedBlocks.json?v=${DATA_VERSION}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching purchasedBlocks.json`);
   const data = await r.json();
-  if (data && (data.cells || data.regions)) {
-    cellsMap = data.cells || {};
-    regions = data.regions || [];
-  } else {
-    cellsMap = data || {};
-    regions = [];
-  }
+  if (data && (data.cells || data.regions)) { cellsMap = data.cells || {}; regions = data.regions || []; }
+  else { cellsMap = data || {}; regions = []; }
 }
 
-/* ------------------------------ Grid rendering ----------------------------- */
+/* ---------- UI ---------- */
 function renderGrid() {
-  const taken = buildTakenSet();
+  const taken = takenSet();
+  const sold = committedSoldSet();
 
-  // Base cells (only free ones are clickable)
   grid.innerHTML = '';
   for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
-    if (taken.has(i)) continue; // skip SOLD or PENDING cells; regions overlay handles sold visuals
-    const block = document.createElement('div');
-    block.className = 'block';
-    block.dataset.index = i;
-    block.addEventListener('click', async () => {
-      const idx = parseInt(block.dataset.index);
-      // Fast deny if our cache already shows pending
-      if (pendingSet.has(idx)) { alert('This block was just reserved.'); renderGrid(); return; }
-      // Re-check server (fresh) before letting user select
-      await maybeRefreshStatus(0);
-      if (pendingSet.has(idx)) { alert('This block was just reserved.'); renderGrid(); return; }
-      block.classList.toggle('selected');
-      updateBuyButtonLabel();
-    });
-    grid.appendChild(block);
+    const el = document.createElement('div');
+    el.className = 'block';
+    el.dataset.index = i;
+
+    if (sold.has(i)) {
+      el.classList.add('sold');
+      el.title = 'Sold';
+      // Sold blocks are not clickable
+    } else if (pendingSet.has(i)) {
+      el.classList.add('pending');
+      el.title = 'Reserved (pending)';
+      // Pending blocks are not clickable
+    } else {
+      // Free: clickable to select
+      el.addEventListener('click', () => {
+        el.classList.toggle('selected');
+        updateBuyButtonLabel();
+      });
+    }
+    grid.appendChild(el);
   }
 
-  // Overlay: regions (multi-block images)
+  // Overlay (sold regions/images)
   regionsLayer.innerHTML = '';
-
-  // Legacy single cells as 1×1 regions
   for (const [k, info] of Object.entries(cellsMap)) {
     const idx = +k;
     const row = Math.floor(idx / GRID_SIZE), col = idx % GRID_SIZE;
     const a = document.createElement('a');
-    a.href = info.linkUrl || '#';
-    a.target = '_blank';
-    a.className = 'region';
-    a.style.left = (col * CELL_PX) + 'px';
-    a.style.top = (row * CELL_PX) + 'px';
-    a.style.width = CELL_PX + 'px';
-    a.style.height = CELL_PX + 'px';
-    a.style.backgroundImage = `url(${info.imageUrl})`;
-    a.title = info.linkUrl || '';
+    a.href = info.linkUrl || '#'; a.target = '_blank'; a.className = 'region';
+    a.style.left = (col * CELL_PX) + 'px'; a.style.top = (row * CELL_PX) + 'px';
+    a.style.width = CELL_PX + 'px'; a.style.height = CELL_PX + 'px';
+    a.style.backgroundImage = `url(${info.imageUrl})`; a.title = info.linkUrl || '';
     regionsLayer.appendChild(a);
   }
-
-  // New multi-block regions
   for (const r of regions) {
-    const start = (r.start|0);
-    const w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
+    const start = (r.start|0), w = Math.max(1, r.w|0), h = Math.max(1, r.h|0);
     const row = Math.floor(start / GRID_SIZE), col = start % GRID_SIZE;
-
     const a = document.createElement('a');
-    a.href = r.linkUrl || '#';
-    a.target = '_blank';
-    a.className = 'region';
-    a.style.left = (col * CELL_PX) + 'px';
-    a.style.top = (row * CELL_PX) + 'px';
-    a.style.width = (w * CELL_PX) + 'px';
-    a.style.height = (h * CELL_PX) + 'px';
-    a.style.backgroundImage = `url(${r.imageUrl})`;
-    a.title = r.linkUrl || '';
+    a.href = r.linkUrl || '#'; a.target = '_blank'; a.className = 'region';
+    a.style.left = (col * CELL_PX) + 'px'; a.style.top = (row * CELL_PX) + 'px';
+    a.style.width = (w * CELL_PX) + 'px'; a.style.height = (h * CELL_PX) + 'px';
+    a.style.backgroundImage = `url(${r.imageUrl})`; a.title = r.linkUrl || '';
     regionsLayer.appendChild(a);
   }
 }
@@ -165,11 +136,11 @@ async function onBuyClick() {
   const selected = selectedIndices();
   if (!selected.length) { alert('Please select at least one free block.'); return; }
 
-  // Double-check with server before attempting lock
+  // Server-side recheck before reserve
   await maybeRefreshStatus(0);
-  const conflictLocal = selected.filter(b => pendingSet.has(b));
-  if (conflictLocal.length) {
-    alert('Some blocks were just reserved: ' + conflictLocal.join(', '));
+  const conflicts = selected.filter(b => pendingSet.has(b) || committedSoldSet().has(b));
+  if (conflicts.length) {
+    alert('Some blocks just got taken: ' + conflicts.join(', '));
     renderGrid(); updateBuyButtonLabel(); return;
   }
 
@@ -179,31 +150,23 @@ async function onBuyClick() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ blocks: selected })
     });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      if (r.status === 409 && err.conflicts) {
-        alert('Some blocks just got reserved by someone else: ' + err.conflicts.join(', '));
-        await loadStatus(); // refresh pending from server
-        renderGrid(); updateBuyButtonLabel();
-        return;
-      }
-      throw new Error(err.error || ('HTTP '+r.status));
-    }
     const res = await r.json();
+    if (!r.ok) {
+      if (r.status === 409 && res.conflicts) {
+        alert('Some blocks just got reserved by someone else: ' + res.conflicts.join(', '));
+        await loadStatus(); renderGrid(); updateBuyButtonLabel(); return;
+      }
+      throw new Error(res.error || ('HTTP '+r.status));
+    }
+
     activeReservationId = res.reservationId;
     activeReservedBlocks = selected.slice();
 
-    // Mark as PENDING locally immediately
+    // Optimistic: mark as pending locally
     for (const b of selected) pendingSet.add(b);
-    renderGrid();
-    updateBuyButtonLabel();
+    renderGrid(); updateBuyButtonLabel();
 
-    // Cross-tab broadcast (same browser)
-    try {
-      localStorage.setItem('iw_pending_update', JSON.stringify({ op: 'add', blocks: selected, ts: Date.now() }));
-    } catch {}
-
-    // Open form
+    // Show form
     infoForm.classList.remove('hidden');
     document.getElementById('blockIndex').value = selected.join(',');
   } catch (e) {
@@ -213,14 +176,9 @@ async function onBuyClick() {
 
 async function onCancel() {
   infoForm.classList.add('hidden');
-  // Optimistically free locally
   for (const b of activeReservedBlocks) pendingSet.delete(b);
   renderGrid(); updateBuyButtonLabel();
 
-  // Cross-tab broadcast
-  try { localStorage.setItem('iw_pending_update', JSON.stringify({ op: 'remove', blocks: activeReservedBlocks, ts: Date.now() })); } catch {}
-
-  // Unlock reservation if we created one
   if (activeReservationId) {
     try {
       await fetch('/.netlify/functions/unlock', {
@@ -231,22 +189,16 @@ async function onCancel() {
     } catch {}
     activeReservationId = null;
     activeReservedBlocks = [];
-    await loadStatus();
-    renderGrid(); updateBuyButtonLabel();
+    await loadStatus(); renderGrid(); updateBuyButtonLabel();
   }
 }
 
-// Netlify: store submission, then redirect to PayPal
 influencerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = new FormData(influencerForm);
-  try {
-    await fetch(influencerForm.action || '/', { method: 'POST', body: data });
-  } catch (err) {
-    console.error('Netlify form post failed:', err);
-  }
-  // Keep reservation until payment webhook converts to SOLD or expires
-//const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
+  try { await fetch(influencerForm.action || '/', { method: 'POST', body: data }); } catch {}
+  
+  //const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
   //const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;juste pour enlever le paiement (enleve le comment apres)
   //const note = `blocks-${blocks.join(',')}`;juste pour enlever le paiement (enleve le comment apres)
   //window.location.href = `${paymentUrl}/${total}?note=${note}`;juste pour enlever le paiement (enleve le comment apres)
@@ -255,53 +207,29 @@ influencerForm.addEventListener('submit', async (e) => {
 
 function updateBuyButtonLabel() {
   const count = selectedIndices().length;
-  if (count === 0) {
-    buyButton.textContent = 'Buy Pixels';
-  } else {
-    const total = getCurrentBlockPrice() * count;
-    buyButton.textContent = `Buy ${count} block${count>1?'s':''} (${count*100} px) – ${formatUSD(total)}`;
-  }
+  if (count === 0) buyButton.textContent = 'Buy Pixels';
+  else buyButton.textContent = `Buy ${count} block${count>1?'s':''} (${count*100} px) – ${formatUSD(getCurrentBlockPrice()*count)}`;
 }
 
-/* ------------------------------ One-time setup ----------------------------- */
+/* ---------- Init ---------- */
 (async () => {
-  try {
-    await Promise.all([loadData(), loadStatus()]);
-    document.title = `Influencers Wall – ${getBlocksSold()} blocks sold`;
-  } catch (err) {
-    alert('Error initializing: ' + err.message);
-  }
-  // Initial render and UI setup
+  try { await Promise.all([loadData(), loadStatus()]); } catch (e) { alert('Init failed: ' + e.message); }
+  document.title = `Influencers Wall – ${getBlocksSold()} blocks sold`;
   renderGrid(); refreshHeaderPricing(); refreshPixelsLeft(); updateBuyButtonLabel();
 
-  // Bind handlers ONCE
   buyButton.addEventListener('click', onBuyClick);
   contactButton.addEventListener('click', () => { window.location.href = 'mailto:you@domain.com'; });
   cancelForm.addEventListener('click', onCancel);
 
-  // Poll server every 3s to keep pending locks fresh for everyone
   setInterval(async () => {
     const before = JSON.stringify([...pendingSet].sort());
     await loadStatus();
     const after = JSON.stringify([...pendingSet].sort());
     if (before !== after) { renderGrid(); updateBuyButtonLabel(); }
   }, STATUS_POLL_MS);
-
-  // Cross-tab (same browser) instant sync
-  window.addEventListener('storage', (e) => {
-    if (e.key !== 'iw_pending_update' || !e.newValue) return;
-    try {
-      const { op, blocks } = JSON.parse(e.newValue);
-      if (Array.isArray(blocks)) {
-        if (op === 'add') blocks.forEach(b => pendingSet.add(b));
-        if (op === 'remove') blocks.forEach(b => pendingSet.delete(b));
-        renderGrid(); updateBuyButtonLabel();
-      }
-    } catch {}
-  });
 })();
 
-// Free reservation if tab closes
+// Optional: free reservation if tab closes
 window.addEventListener('pagehide', async () => {
   if (!activeReservationId) return;
   try {

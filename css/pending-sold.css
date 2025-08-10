@@ -1,0 +1,4 @@
+/* Deterministic grid helpers */
+.block.sold { background: #e5e7eb !important; border-color: #cbd5e1 !important; cursor: not-allowed; }
+.block.pending { background: repeating-linear-gradient(45deg,#fff7ed, #fff7ed 6px, #ffedd5 6px, #ffedd5 12px); border-color: #f59e0b !important; cursor: not-allowed; }
+.block.selected { outline: 1px solid #ef4444; }
