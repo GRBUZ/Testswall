@@ -1,8 +1,9 @@
-// === Reserve-on-click frontend patch ===
-// - Clicking a free block immediately calls the lock function (op:add) and marks it PENDING if success.
-// - Clicking again (selected) removes it from the reservation (op:remove).
-// - No more "select then reserve later": reservation exists as you select.
-// - Uses a single reservationId per session until cancel/submit.
+// === Reserve-on-click: fix regression ===
+// Key changes:
+// - Track your own reserved blocks in myReservedSet
+// - Pending blocks that are YOURS stay clickable (to remove)
+// - Buy button uses myReservedSet (not DOM .selected which gets re-rendered)
+// - Deterministic 10k-cell grid
 
 const grid = document.getElementById('pixelGrid');
 const regionsLayer = document.getElementById('regionsLayer');
@@ -23,10 +24,12 @@ const STATUS_POLL_MS = 3000;
 
 let cellsMap = {};
 let regions = [];
-let pendingSet = new Set();
+let pendingSet = new Set();     // all pending (everyone)
+let myReservedSet = new Set();  // only my reservation blocks
 let activeReservationId = null;
 let lastStatusAt = 0;
 
+/* ---------- Pricing ---------- */
 function committedSoldSet() {
   const set = new Set();
   for (const k of Object.keys(cellsMap)) set.add(+k);
@@ -45,6 +48,7 @@ function formatUSD(n) { return '$' + n.toFixed(2); }
 function refreshHeaderPricing() { priceLine.textContent = `1 Pixel = ${formatUSD(getCurrentPixelPrice())}`; }
 function refreshPixelsLeft() { const left = TOTAL_PIXELS - getBlocksSold() * 100; pixelsLeftEl.textContent = `${left.toLocaleString()} pixels left`; }
 
+/* ---------- Data ---------- */
 async function loadStatus() {
   try { const r = await fetch('/.netlify/functions/status', { cache:'no-store' }); const s = await r.json(); pendingSet = new Set((s && s.pending) || []); lastStatusAt = Date.now(); } catch {}
 }
@@ -57,8 +61,8 @@ async function loadData() {
   else { cellsMap = data || {}; regions = []; }
 }
 
+/* ---------- UI ---------- */
 function renderGrid() {
-  const taken = takenSet();
   const sold = committedSoldSet();
 
   grid.innerHTML = '';
@@ -67,49 +71,23 @@ function renderGrid() {
     el.className = 'block';
     el.dataset.index = i;
 
-    if (sold.has(i)) {
+    const isSold = sold.has(i);
+    const isMine = myReservedSet.has(i);
+    const isPending = pendingSet.has(i);
+
+    if (isSold) {
       el.classList.add('sold'); el.title = 'Sold';
-    } else if (pendingSet.has(i)) {
+    } else if (isMine) {
+      // Your own reserved block: keep clickable to REMOVE
+      el.classList.add('pending', 'selected');
+      el.title = 'Your selection (reserved)';
+      el.addEventListener('click', () => removeOne(i));
+    } else if (isPending) {
+      // Someone else’s pending: non-clickable
       el.classList.add('pending'); el.title = 'Reserved (pending)';
     } else {
-      // Reserve-on-click
-      el.addEventListener('click', async () => {
-        const idx = parseInt(el.dataset.index);
-        await maybeRefreshStatus(0);
-        if (pendingSet.has(idx) || sold.has(idx)) { renderGrid(); return; }
-
-        const isSelected = el.classList.contains('selected');
-        const op = isSelected ? 'remove' : 'add';
-
-        try {
-          const r = await fetch('/.netlify/functions/lock', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ op, blocks: [idx], reservationId: activeReservationId || undefined })
-          });
-          const res = await r.json();
-          if (!r.ok) {
-            if (r.status === 409 && res.conflicts) {
-              alert('Just reserved by someone else.');
-              await loadStatus(); renderGrid(); return;
-            }
-            throw new Error(res.error || ('HTTP '+r.status));
-          }
-          // Created or updated reservation
-          activeReservationId = res.reservationId || activeReservationId;
-
-          if (op === 'add') {
-            pendingSet.add(idx);
-            el.classList.add('selected');
-          } else {
-            pendingSet.delete(idx);
-            el.classList.remove('selected');
-          }
-          renderGrid(); updateBuyButtonLabel();
-        } catch (e) {
-          alert('Reservation error: ' + e.message);
-        }
-      });
+      // Free: clickable to ADD
+      el.addEventListener('click', () => addOne(i));
     }
     grid.appendChild(el);
   }
@@ -121,10 +99,9 @@ function renderGrid() {
     const row = Math.floor(idx / GRID_SIZE), col = idx % GRID_SIZE;
     const a = document.createElement('a');
     a.href = info.linkUrl || '#'; a.target = '_blank'; a.className = 'region';
-    a.style.left = (col * 10) + 'px'; a.style.top = (row * 10) + 'px';
-    a.style.width = '10px'; a.style.height = '10px';
-    a.style.backgroundImage = `url(${info.imageUrl})`;
-    a.title = info.linkUrl || '';
+    a.style.left = (col * CELL_PX) + 'px'; a.style.top = (row * CELL_PX) + 'px';
+    a.style.width = CELL_PX + 'px'; a.style.height = CELL_PX + 'px';
+    a.style.backgroundImage = `url(${info.imageUrl})`; a.title = info.linkUrl || '';
     regionsLayer.appendChild(a);
   }
   for (const r of regions) {
@@ -132,17 +109,71 @@ function renderGrid() {
     const row = Math.floor(start / GRID_SIZE), col = start % GRID_SIZE;
     const a = document.createElement('a');
     a.href = r.linkUrl || '#'; a.target = '_blank'; a.className = 'region';
-    a.style.left = (col * 10) + 'px'; a.style.top = (row * 10) + 'px';
-    a.style.width = (w * 10) + 'px'; a.style.height = (h * 10) + 'px';
+    a.style.left = (col * CELL_PX) + 'px'; a.style.top = (row * CELL_PX) + 'px';
+    a.style.width = (w * CELL_PX) + 'px'; a.style.height = (h * CELL_PX) + 'px';
     a.style.backgroundImage = `url(${r.imageUrl})`; a.title = r.linkUrl || '';
     regionsLayer.appendChild(a);
   }
+
+  updateBuyButtonLabel();
 }
 
-function selectedCount() {
-  // Selected = blocks in our active reservation that we also mark with .selected locally.
-  return document.querySelectorAll('.block.selected').length;
+/* ---------- Add / Remove helpers ---------- */
+async function addOne(idx) {
+  await maybeRefreshStatus(0);
+  const sold = committedSoldSet();
+  if (pendingSet.has(idx) || sold.has(idx)) { renderGrid(); return; }
+  try {
+    const r = await fetch('/.netlify/functions/lock', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ op:'add', blocks:[idx], reservationId: activeReservationId || undefined })
+    });
+    const res = await r.json();
+    if (!r.ok) {
+      if (r.status === 409) { await loadStatus(); renderGrid(); return; }
+      throw new Error(res.error || ('HTTP '+r.status));
+    }
+    activeReservationId = res.reservationId || activeReservationId;
+    // Trust server state: use returned array of blocks for my selection
+    myReservedSet = new Set(res.blocks || []);
+    // Also mark globally pending
+    for (const b of myReservedSet) pendingSet.add(b);
+    renderGrid();
+  } catch (e) {
+    alert('Reservation error: ' + e.message);
+  }
 }
+async function removeOne(idx) {
+  try {
+    const r = await fetch('/.netlify/functions/lock', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ op:'remove', blocks:[idx], reservationId: activeReservationId })
+    });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || ('HTTP '+r.status));
+    if (!res.reservationId) {
+      // Reservation deleted (empty)
+      activeReservationId = null;
+      myReservedSet = new Set();
+      await loadStatus();
+      renderGrid();
+      return;
+    }
+    myReservedSet = new Set(res.blocks || []);
+    // Sync pending with server list (remove idx at least)
+    pendingSet.delete(idx);
+    // But keep other pending we might have
+    for (const b of myReservedSet) pendingSet.add(b);
+    renderGrid();
+  } catch (e) {
+    alert('Unreserve error: ' + e.message);
+  }
+}
+
+/* ---------- Buy / Cancel ---------- */
+function selectedCount() { return myReservedSet.size; }
 
 function updateBuyButtonLabel() {
   const count = selectedCount();
@@ -154,9 +185,7 @@ async function onBuyClick() {
   const count = selectedCount();
   if (!activeReservationId || count === 0) { alert('Please select blocks first.'); return; }
   infoForm.classList.remove('hidden');
-  // Fill hidden field with current selected indices
-  const selected = Array.from(document.querySelectorAll('.block.selected')).map(el => parseInt(el.dataset.index));
-  document.getElementById('blockIndex').value = selected.join(',');
+  document.getElementById('blockIndex').value = Array.from(myReservedSet).join(',');
 }
 
 async function onCancel() {
@@ -170,10 +199,9 @@ async function onCancel() {
       });
     } catch {}
     activeReservationId = null;
-    // clear our local selections
-    pendingSet = new Set();
-    renderGrid(); updateBuyButtonLabel();
-    await loadStatus(); renderGrid(); updateBuyButtonLabel();
+    myReservedSet = new Set();
+    await loadStatus();
+    renderGrid();
   }
 }
 
@@ -182,12 +210,10 @@ influencerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = new FormData(influencerForm);
   try { await fetch(influencerForm.action || '/', { method: 'POST', body: data }); } catch {}
-  // Keep reservation until payment webhook converts to SOLD or expires
-  //const blocks = (data.get('blockIndex') || '').split(',').filter(Boolean); juste pour enlever le paiement (enleve le comment apres)
-  //const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;juste pour enlever le paiement (enleve le comment apres)
-  //const note = `blocks-${blocks.join(',')}`;juste pour enlever le paiement (enleve le comment apres)
-  //window.location.href = `${paymentUrl}/${total}?note=${note}`;juste pour enlever le paiement (enleve le comment apres)
-    window.location.href = influencerForm.action || '/success.html'; // test: page de succès
+  const blocks = Array.from(myReservedSet);
+  const total = Math.round(getCurrentBlockPrice() * blocks.length * 100) / 100;
+  const note = `blocks-${blocks.join(',')}`;
+  window.location.href = `${paymentUrl}/${total}?note=${note}`;
 });
 
 /* ---------- Init ---------- */
@@ -200,16 +226,15 @@ influencerForm.addEventListener('submit', async (e) => {
   contactButton.addEventListener('click', () => { window.location.href = 'mailto:you@domain.com'; });
   cancelForm.addEventListener('click', onCancel);
 
-  // Poll server to keep pendingSet in sync across users
   setInterval(async () => {
     const before = JSON.stringify([...pendingSet].sort());
     await loadStatus();
     const after = JSON.stringify([...pendingSet].sort());
-    if (before !== after) { renderGrid(); updateBuyButtonLabel(); }
+    if (before !== after) { renderGrid(); }
   }, STATUS_POLL_MS);
 })();
 
-// Free reservation if tab closes
+// Free reservation if tab closes (best effort)
 window.addEventListener('pagehide', async () => {
   if (!activeReservationId) return;
   try {
